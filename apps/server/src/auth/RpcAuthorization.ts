@@ -7,6 +7,7 @@ import {
   AuthReviewWriteScope,
   AuthTerminalOperateScope,
   ORCHESTRATION_WS_METHODS,
+  THREAD_QUEUE_WS_METHODS,
   type AuthEnvironmentScope,
   WS_METHODS,
   WsRpcGroup,
@@ -21,6 +22,13 @@ type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
  * runtime failure.
  */
 export const RPC_REQUIRED_SCOPES = {
+  [THREAD_QUEUE_WS_METHODS.upsert]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.remove]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.reorder]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.promote]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.pause]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.hold]: AuthOrchestrationOperateScope,
+  [THREAD_QUEUE_WS_METHODS.subscribe]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.dispatchCommand]: AuthOrchestrationOperateScope,
   [ORCHESTRATION_WS_METHODS.getWorkflowScript]: AuthOrchestrationReadScope,
   [ORCHESTRATION_WS_METHODS.getTurnDiff]: AuthOrchestrationReadScope,

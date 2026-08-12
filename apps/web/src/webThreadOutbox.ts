@@ -6,13 +6,18 @@ import {
   ProviderInteractionMode,
   RuntimeMode,
   ThreadId,
+  type ThreadQueueSnapshot,
   type UploadChatAttachment,
 } from "@t3tools/contracts";
 import {
   ActiveTurnMessageBehavior,
   type ActiveTurnMessageBehavior as ActiveTurnMessageBehaviorType,
 } from "@t3tools/contracts/settings";
-import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import {
+  parseScopedThreadKey,
+  scopedThreadKey,
+  scopeThreadRef,
+} from "@t3tools/client-runtime/environment";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
@@ -268,17 +273,33 @@ function persistThreadHold(threadKey: string, held: boolean): boolean {
 }
 
 function mergedSnapshot(
-  state: Pick<WebThreadOutboxState, "queuesByThreadKey" | "pausedMessageIds" | "heldThreadKeys">,
+  state: Pick<
+    WebThreadOutboxState,
+    "queuesByThreadKey" | "pausedMessageIds" | "heldThreadKeys" | "serverManagedEnvironmentIds"
+  >,
 ) {
   const persisted = readPersistedSnapshot();
-  const messages = [
-    ...flattenQueues(state.queuesByThreadKey),
-    ...flattenQueues(persisted.queuesByThreadKey),
-  ];
+  const persistedMessages = flattenQueues(persisted.queuesByThreadKey).filter(
+    (message) => !state.serverManagedEnvironmentIds[message.environmentId],
+  );
+  const persistedMessageIds = new Set(persistedMessages.map((message) => message.messageId));
+  const persistedPausedMessageIds = Object.fromEntries(
+    Object.entries(persisted.pausedMessageIds).filter(([messageId]) =>
+      persistedMessageIds.has(MessageId.make(messageId)),
+    ),
+  ) as Record<MessageId, true>;
+  const persistedHeldThreadKeys = Object.fromEntries(
+    Object.entries(persisted.heldThreadKeys).filter(([threadKey]) => {
+      const threadRef = parseScopedThreadKey(threadKey);
+      return threadRef === null || !state.serverManagedEnvironmentIds[threadRef.environmentId];
+    }),
+  );
+  const messages = [...flattenQueues(state.queuesByThreadKey), ...persistedMessages];
   return {
     queuesByThreadKey: groupMessages(messages),
-    pausedMessageIds: { ...state.pausedMessageIds, ...persisted.pausedMessageIds },
-    heldThreadKeys: { ...state.heldThreadKeys, ...persisted.heldThreadKeys },
+    pausedMessageIds: { ...state.pausedMessageIds, ...persistedPausedMessageIds },
+    heldThreadKeys: { ...state.heldThreadKeys, ...persistedHeldThreadKeys },
+    serverManagedEnvironmentIds: state.serverManagedEnvironmentIds,
   };
 }
 
@@ -286,6 +307,7 @@ interface WebThreadOutboxState {
   readonly queuesByThreadKey: Record<string, ReadonlyArray<QueuedWebThreadMessage>>;
   readonly pausedMessageIds: Readonly<Record<MessageId, true>>;
   readonly heldThreadKeys: Readonly<Record<string, true>>;
+  readonly serverManagedEnvironmentIds: Readonly<Record<EnvironmentId, true>>;
   readonly enqueue: (message: QueuedWebThreadMessage) => { durable: boolean };
   readonly remove: (message: QueuedWebThreadMessage) => { durable: boolean };
   readonly promoteToSteer: (
@@ -301,12 +323,17 @@ interface WebThreadOutboxState {
   readonly retry: (messageId: MessageId) => void;
   readonly holdThread: (environmentId: EnvironmentId, threadId: ThreadId) => { changed: boolean };
   readonly releaseThread: (environmentId: EnvironmentId, threadId: ThreadId) => void;
+  readonly replaceEnvironmentSnapshot: (
+    environmentId: EnvironmentId,
+    snapshot: ThreadQueueSnapshot,
+  ) => void;
 }
 
 export const useWebThreadOutboxStore = create<WebThreadOutboxState>()((set, get) => ({
   queuesByThreadKey: {},
   pausedMessageIds: {},
   heldThreadKeys: {},
+  serverManagedEnvironmentIds: {},
   enqueue: (message) => {
     const snapshot = mergedSnapshot(get());
     const queuesByThreadKey = groupMessages([
@@ -432,6 +459,57 @@ export const useWebThreadOutboxStore = create<WebThreadOutboxState>()((set, get)
     delete heldThreadKeys[threadKey];
     set({ ...snapshot, heldThreadKeys });
   },
+  replaceEnvironmentSnapshot: (environmentId, snapshot) => {
+    const current = get();
+    const retainedMessages = flattenQueues(current.queuesByThreadKey).filter(
+      (message) => message.environmentId !== environmentId,
+    );
+    const messages: QueuedWebThreadMessage[] = snapshot.messages.map(
+      ({ paused: _paused, composerText, queueOrder, steerRequestedAt, ...message }) => ({
+        ...message,
+        environmentId,
+        ...(composerText === undefined ? {} : { composerText }),
+        ...(queueOrder === undefined ? {} : { queueOrder }),
+        ...(steerRequestedAt === undefined ? {} : { steerRequestedAt }),
+      }),
+    );
+    const retainedMessageIds = new Set(retainedMessages.map((message) => message.messageId));
+    const pausedMessageIds = Object.fromEntries(
+      Object.entries(current.pausedMessageIds).filter(([messageId]) =>
+        retainedMessageIds.has(MessageId.make(messageId)),
+      ),
+    ) as Record<MessageId, true>;
+    for (const message of snapshot.messages) {
+      if (message.paused) pausedMessageIds[message.messageId] = true;
+    }
+    const heldThreadKeys = Object.fromEntries(
+      Object.entries(current.heldThreadKeys).filter(([threadKey]) => {
+        const threadRef = parseScopedThreadKey(threadKey);
+        return threadRef === null || threadRef.environmentId !== environmentId;
+      }),
+    ) as Record<string, true>;
+    for (const threadId of snapshot.heldThreadIds) {
+      heldThreadKeys[webThreadOutboxKey(environmentId, threadId)] = true;
+    }
+
+    const persisted = readPersistedSnapshot();
+    for (const message of flattenQueues(persisted.queuesByThreadKey)) {
+      if (message.environmentId === environmentId) removePersistedEntry(message.messageId);
+    }
+    for (const threadKey of Object.keys(persisted.heldThreadKeys)) {
+      const threadRef = parseScopedThreadKey(threadKey);
+      if (threadRef?.environmentId === environmentId) persistThreadHold(threadKey, false);
+    }
+    set({
+      queuesByThreadKey: groupMessages([...retainedMessages, ...messages]),
+      pausedMessageIds,
+      heldThreadKeys,
+      serverManagedEnvironmentIds: {
+        ...current.serverManagedEnvironmentIds,
+        [environmentId]: true,
+      },
+    });
+  },
 }));
 
 export const EMPTY_WEB_THREAD_OUTBOX_QUEUE: ReadonlyArray<QueuedWebThreadMessage> = [];
@@ -461,7 +539,7 @@ if (storageIsDurable && typeof window !== "undefined") {
     ) {
       return;
     }
-    useWebThreadOutboxStore.setState(readPersistedSnapshot());
+    useWebThreadOutboxStore.setState((state) => mergedSnapshot(state));
   });
 }
 
@@ -539,7 +617,10 @@ function clearStorageForTest(): void {
 export function writeWebThreadOutboxStorageForTest(raw: string): void {
   clearStorageForTest();
   if (raw) baseOutboxStorage.setItem(WEB_THREAD_OUTBOX_STORAGE_KEY, raw);
-  useWebThreadOutboxStore.setState(readPersistedSnapshot());
+  useWebThreadOutboxStore.setState({
+    ...readPersistedSnapshot(),
+    serverManagedEnvironmentIds: {},
+  });
   dispatchingMessageIds.clear();
 }
 
@@ -549,6 +630,9 @@ export function writeWebThreadOutboxEntryForTest(
 ): void {
   persistEntry(message, options?.paused ?? false);
   if (options?.syncStore !== false) {
-    useWebThreadOutboxStore.setState(readPersistedSnapshot());
+    useWebThreadOutboxStore.setState({
+      ...readPersistedSnapshot(),
+      serverManagedEnvironmentIds: {},
+    });
   }
 }

@@ -1,4 +1,6 @@
-import { CommandId } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
+import { CommandId, type EnvironmentId, type ThreadQueueSnapshot } from "@t3tools/contracts";
+import { AsyncResult } from "effect/unstable/reactivity";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { resolveThreadMetadataUpdateForNextTurn } from "./ChatView.logic";
@@ -16,6 +18,7 @@ import { environmentPresentations } from "../state/presentation";
 import { appAtomRegistry } from "../rpc/atomRegistry";
 import { environmentThreadShells, threadEnvironment } from "../state/threads";
 import { useAtomCommand } from "../state/use-atom-command";
+import { threadQueueEnvironment } from "../state/threadQueue";
 import {
   beginWebThreadOutboxDispatch,
   finishWebThreadOutboxDispatch,
@@ -27,10 +30,81 @@ function settingsCommandId(commandId: CommandId, setting: string): CommandId {
   return CommandId.make(`${commandId}:${setting}`);
 }
 
+function SharedThreadQueueSync({ environmentId }: { readonly environmentId: EnvironmentId }) {
+  const snapshotResult = useAtomValue(
+    threadQueueEnvironment.snapshots({ environmentId, input: {} }),
+  );
+  const upsert = useAtomCommand(threadQueueEnvironment.upsert, { reportFailure: false });
+  const initialized = useRef(false);
+  const migrating = useRef(false);
+  const latestSnapshot = useRef<ThreadQueueSnapshot | null>(null);
+
+  useEffect(() => {
+    if (!AsyncResult.isSuccess(snapshotResult)) return;
+    const snapshot = snapshotResult.value;
+    latestSnapshot.current = snapshot;
+    if (migrating.current) return;
+    if (initialized.current) {
+      useWebThreadOutboxStore.getState().replaceEnvironmentSnapshot(environmentId, snapshot);
+      return;
+    }
+
+    const localMessages = Object.values(useWebThreadOutboxStore.getState().queuesByThreadKey)
+      .flat()
+      .filter((message) => message.environmentId === environmentId);
+    const remoteMessageIds = new Set(snapshot.messages.map((message) => message.messageId));
+    const messagesToMigrate = localMessages.filter(
+      (message) => !remoteMessageIds.has(message.messageId),
+    );
+    if (messagesToMigrate.length === 0) {
+      initialized.current = true;
+      useWebThreadOutboxStore.getState().replaceEnvironmentSnapshot(environmentId, snapshot);
+      return;
+    }
+
+    migrating.current = true;
+    void (async () => {
+      let latest: ThreadQueueSnapshot = snapshot;
+      for (const { environmentId: _environmentId, ...message } of messagesToMigrate) {
+        const result = await upsert({
+          environmentId,
+          input: {
+            message: {
+              ...message,
+              paused: Boolean(
+                useWebThreadOutboxStore.getState().pausedMessageIds[message.messageId],
+              ),
+            },
+          },
+        });
+        if (!AsyncResult.isSuccess(result)) {
+          migrating.current = false;
+          return;
+        }
+        latest = result.value;
+      }
+      initialized.current = true;
+      migrating.current = false;
+      const newest = latestSnapshot.current;
+      useWebThreadOutboxStore
+        .getState()
+        .replaceEnvironmentSnapshot(
+          environmentId,
+          newest !== null && newest.revision > latest.revision ? newest : latest,
+        );
+    })();
+  }, [environmentId, snapshotResult, upsert]);
+
+  return null;
+}
+
 export function WebThreadOutboxDrain() {
   const queuesByThreadKey = useWebThreadOutboxStore((state) => state.queuesByThreadKey);
   const pausedMessageIds = useWebThreadOutboxStore((state) => state.pausedMessageIds);
   const heldThreadKeys = useWebThreadOutboxStore((state) => state.heldThreadKeys);
+  const serverManagedEnvironmentIds = useWebThreadOutboxStore(
+    (state) => state.serverManagedEnvironmentIds,
+  );
   const threads = useThreadShells();
   const { environments } = useEnvironments();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
@@ -43,6 +117,8 @@ export function WebThreadOutboxDrain() {
     reportFailure: false,
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
+  const sharedQueueRemove = useAtomCommand(threadQueueEnvironment.remove, { reportFailure: false });
+  const sharedQueuePause = useAtomCommand(threadQueueEnvironment.pause, { reportFailure: false });
   const [drainTick, setDrainTick] = useState(0);
   const deliveryGatesRef = useRef(new Map<string, WebThreadOutboxDeliveryGate>());
 
@@ -89,6 +165,12 @@ export function WebThreadOutboxDrain() {
       }
       const environment = environmentById.get(message.environmentId);
       if (
+        environment?.serverConfig?.environment.capabilities.sharedThreadQueue === true &&
+        !serverManagedEnvironmentIds[message.environmentId]
+      ) {
+        continue;
+      }
+      if (
         shouldDrainWebThreadOutbox({
           sessionStatus: thread.session?.status ?? null,
           environmentConnected: environment?.connection.phase === "connected",
@@ -101,13 +183,24 @@ export function WebThreadOutboxDrain() {
       }
     }
     return null;
-  }, [drainTick, environments, heldThreadKeys, pausedMessageIds, queuesByThreadKey, threads]);
+  }, [
+    drainTick,
+    environments,
+    heldThreadKeys,
+    pausedMessageIds,
+    queuesByThreadKey,
+    serverManagedEnvironmentIds,
+    threads,
+  ]);
 
   useEffect(() => {
     if (!nextDelivery || !beginWebThreadOutboxDispatch(nextDelivery.message.messageId)) {
       return;
     }
     const { message, thread } = nextDelivery;
+    const serverManaged = Boolean(
+      useWebThreadOutboxStore.getState().serverManagedEnvironmentIds[message.environmentId],
+    );
     const threadKey = `${message.environmentId}:${message.threadId}`;
     const existingGate = deliveryGatesRef.current.get(threadKey);
     const createdGate = existingGate === undefined;
@@ -219,7 +312,20 @@ export function WebThreadOutboxDrain() {
         if (result._tag === "Failure") {
           releaseCreatedGate();
           if (!shouldPauseWebThreadOutboxDelivery(result)) return;
-          useWebThreadOutboxStore.getState().pause(message.messageId);
+          if (serverManaged) {
+            void sharedQueuePause({
+              environmentId: message.environmentId,
+              input: { messageId: message.messageId, paused: true },
+            }).then((pauseResult) => {
+              if (pauseResult._tag === "Success") {
+                useWebThreadOutboxStore
+                  .getState()
+                  .replaceEnvironmentSnapshot(message.environmentId, pauseResult.value);
+              }
+            });
+          } else {
+            useWebThreadOutboxStore.getState().pause(message.messageId);
+          }
           toastManager.add(
             stackedThreadToast({
               type: "warning",
@@ -229,12 +335,32 @@ export function WebThreadOutboxDrain() {
           );
           return;
         }
-        useWebThreadOutboxStore.getState().remove(message);
+        if (serverManaged) {
+          void sharedQueueRemove({
+            environmentId: message.environmentId,
+            input: { messageId: message.messageId },
+          }).then((removeResult) => {
+            if (removeResult._tag === "Success") {
+              useWebThreadOutboxStore
+                .getState()
+                .replaceEnvironmentSnapshot(message.environmentId, removeResult.value);
+            }
+          });
+        } else {
+          useWebThreadOutboxStore.getState().remove(message);
+        }
       })
       .catch((error: unknown) => {
         releaseCreatedGate();
         console.error("[THREAD-OUTBOX] Queued delivery failed unexpectedly.", error);
-        useWebThreadOutboxStore.getState().pause(message.messageId);
+        if (serverManaged) {
+          void sharedQueuePause({
+            environmentId: message.environmentId,
+            input: { messageId: message.messageId, paused: true },
+          });
+        } else {
+          useWebThreadOutboxStore.getState().pause(message.messageId);
+        }
       })
       .finally(() => {
         finishWebThreadOutboxDispatch(message.messageId);
@@ -244,9 +370,25 @@ export function WebThreadOutboxDrain() {
     nextDelivery,
     setThreadInteractionMode,
     setThreadRuntimeMode,
+    sharedQueuePause,
+    sharedQueueRemove,
     startThreadTurn,
     updateThreadMetadata,
   ]);
 
-  return null;
+  return (
+    <>
+      {environments
+        .filter(
+          (environment) =>
+            environment.serverConfig?.environment.capabilities.sharedThreadQueue === true,
+        )
+        .map((environment) => (
+          <SharedThreadQueueSync
+            key={environment.environmentId}
+            environmentId={environment.environmentId}
+          />
+        ))}
+    </>
+  );
 }

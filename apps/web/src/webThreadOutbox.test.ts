@@ -20,6 +20,7 @@ import {
 } from "./webThreadOutbox";
 
 const environmentId = EnvironmentId.make("environment-test");
+const otherEnvironmentId = EnvironmentId.make("environment-other");
 const threadId = ThreadId.make("thread-test");
 
 function message(index: number): QueuedWebThreadMessage {
@@ -212,6 +213,52 @@ describe("web thread outbox", () => {
         webThreadOutboxKey(environmentId, threadId)
       ];
     expect(queue?.map((entry) => entry.messageId)).toEqual([second.messageId]);
+  });
+
+  it("replaces one environment from the shared server snapshot without disturbing another", () => {
+    const local = message(1);
+    const retained = { ...message(2), environmentId: otherEnvironmentId };
+    const remote = message(3);
+    const { environmentId: _environmentId, ...remoteMessage } = remote;
+    const store = useWebThreadOutboxStore.getState();
+    store.enqueue(local);
+    store.enqueue(retained);
+
+    store.replaceEnvironmentSnapshot(environmentId, {
+      revision: 7,
+      messages: [{ ...remoteMessage, paused: true }],
+      heldThreadIds: [threadId],
+    });
+
+    const snapshot = useWebThreadOutboxStore.getState();
+    expect(snapshot.serverManagedEnvironmentIds[environmentId]).toBe(true);
+    expect(
+      snapshot.queuesByThreadKey[webThreadOutboxKey(environmentId, threadId)]?.map(
+        (entry) => entry.messageId,
+      ),
+    ).toEqual([remote.messageId]);
+    expect(snapshot.pausedMessageIds[remote.messageId]).toBe(true);
+    expect(snapshot.heldThreadKeys[webThreadOutboxKey(environmentId, threadId)]).toBe(true);
+    expect(
+      snapshot.queuesByThreadKey[webThreadOutboxKey(otherEnvironmentId, threadId)]?.map(
+        (entry) => entry.messageId,
+      ),
+    ).toEqual([retained.messageId]);
+
+    store.replaceEnvironmentSnapshot(environmentId, {
+      revision: 8,
+      messages: [],
+      heldThreadIds: [],
+    });
+    const cleared = useWebThreadOutboxStore.getState();
+    expect(cleared.queuesByThreadKey[webThreadOutboxKey(environmentId, threadId)]).toBeUndefined();
+    expect(cleared.pausedMessageIds[remote.messageId]).toBeUndefined();
+    expect(cleared.heldThreadKeys[webThreadOutboxKey(environmentId, threadId)]).toBeUndefined();
+    expect(
+      cleared.queuesByThreadKey[webThreadOutboxKey(otherEnvironmentId, threadId)]?.map(
+        (entry) => entry.messageId,
+      ),
+    ).toEqual([retained.messageId]);
   });
 
   it("permits only one dispatcher for a stable message id", () => {
