@@ -1901,7 +1901,10 @@ export const makeCodexSessionRuntime = (
             const turnId = TurnId.make(response.turn.id);
             yield* updateSession(sessionRef, {
               status: "running",
-              activeTurnId: turnId,
+              // Codex may acknowledge a follow-up before the current turn
+              // settles. Keep Stop targeted at the turn that is actually
+              // active; turn/started will promote the queued id later.
+              activeTurnId: session.activeTurnId ?? turnId,
               ...(normalizedModel ? { model: normalizedModel } : {}),
             });
             const resumedProviderThreadId = currentProviderThreadId(yield* Ref.get(sessionRef));
