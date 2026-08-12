@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveClerkSignInProps, resolveClerkSignUpProps } from "./authRedirect";
+import {
+  resolveClerkSignInProps,
+  resolveClerkSignUpAction,
+  T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL,
+} from "./authRedirect";
 
 describe("resolveClerkSignInProps", () => {
   it("returns to the current browser URL on the web", () => {
@@ -28,21 +32,19 @@ describe("resolveClerkSignInProps", () => {
   });
 });
 
-describe("resolveClerkSignUpProps", () => {
-  it("returns to the current browser URL on the web", () => {
+describe("resolveClerkSignUpAction", () => {
+  it("uses Clerk's embedded sign-up flow on the web", () => {
     const href = "https://app.t3.codes/connect?state=state-1#details";
-    expect(resolveClerkSignUpProps(href, false)).toEqual({ forceRedirectUrl: href });
+    expect(resolveClerkSignUpAction(href, false)).toEqual({
+      type: "clerk",
+      props: { forceRedirectUrl: href },
+    });
   });
 
-  it("starts a direct desktop sign-up while preserving the T3 route", () => {
-    expect(
-      resolveClerkSignUpProps(
-        "t3code://app/CLERK-ROUTER/VIRTUAL/sign-in?__clerk_status=failed#/settings/connections",
-        true,
-      ),
-    ).toEqual({
-      forceRedirectUrl: "t3code://app/#/settings/connections",
-      signInForceRedirectUrl: "t3code://app/#/settings/connections",
+  it("uses Clerk's hosted account portal on desktop", () => {
+    expect(resolveClerkSignUpAction("t3code://app/#/settings/connections", true)).toEqual({
+      type: "hosted",
+      url: T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL,
     });
   });
 });

@@ -3,10 +3,11 @@ export interface ClerkSignInProps {
   signUpForceRedirectUrl?: string;
 }
 
-export interface ClerkSignUpProps {
-  forceRedirectUrl?: string;
-  signInForceRedirectUrl?: string;
-}
+export const T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL = "https://accounts.t3.codes/sign-up";
+
+export type ClerkSignUpAction =
+  | { type: "clerk"; props: { forceRedirectUrl: string } }
+  | { type: "hosted"; url: string };
 
 function resolveClerkDesktopRedirectUrl(href: string): string {
   // Electron routes through the hash, so reset any Clerk virtual pathname without losing the T3 page.
@@ -28,13 +29,9 @@ export function resolveClerkSignInProps(href: string, isElectron: boolean): Cler
   return { forceRedirectUrl: href };
 }
 
-export function resolveClerkSignUpProps(href: string, isElectron: boolean): ClerkSignUpProps {
+export function resolveClerkSignUpAction(href: string, isElectron: boolean): ClerkSignUpAction {
   if (isElectron) {
-    const redirectUrl = resolveClerkDesktopRedirectUrl(href);
-    return {
-      forceRedirectUrl: redirectUrl,
-      signInForceRedirectUrl: redirectUrl,
-    };
+    return { type: "hosted", url: T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL };
   }
-  return { forceRedirectUrl: href };
+  return { type: "clerk", props: { forceRedirectUrl: href } };
 }
