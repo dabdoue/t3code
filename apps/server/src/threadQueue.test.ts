@@ -8,6 +8,7 @@ import {
   type SharedQueuedThreadMessage,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as DateTime from "effect/DateTime";
 import * as Fiber from "effect/Fiber";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -33,7 +34,7 @@ function message(index: number): SharedQueuedThreadMessage {
     activeTurnMessageBehavior: "queue",
     queueOrder: index,
     paused: false,
-    createdAt: new Date(1_700_000_000_000 + index).toISOString(),
+    createdAt: DateTime.formatIso(DateTime.makeUnsafe(1_700_000_000_000 + index)),
   };
 }
 

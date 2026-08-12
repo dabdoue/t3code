@@ -2662,8 +2662,9 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
     yield* Effect.gen(function* () {
       const eventStore = yield* OrchestrationEventStore;
       const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const sql = yield* SqlClient.SqlClient;
 
-      yield* eventStore.append({
+      const turnStartEvent = yield* eventStore.append({
         type: "thread.turn-start-requested",
         eventId: EventId.make("evt-restart-1"),
         aggregateKind: "thread",
@@ -2686,6 +2687,15 @@ it.effect("restores pending turn-start metadata across projection pipeline resta
       });
 
       yield* projectionPipeline.bootstrap;
+
+      const pendingRows = yield* sql<{ readonly eventSequence: number | null }>`
+        SELECT intent_event_sequence AS "eventSequence"
+        FROM projection_turns
+        WHERE thread_id = ${threadId}
+          AND turn_id IS NULL
+          AND state = 'pending'
+      `;
+      assert.deepEqual(pendingRows, [{ eventSequence: turnStartEvent.sequence }]);
     }).pipe(Effect.provide(firstProjectionLayer));
 
     const turnRows = yield* Effect.gen(function* () {

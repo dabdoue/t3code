@@ -14,6 +14,7 @@ import * as ServerConfig from "./config.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 
 it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
@@ -106,6 +107,77 @@ it.effect("launchStartupHeartbeat does not block the caller while counts are loa
       );
     }),
   ),
+);
+
+it.effect("reconciles projected sessions that have no live provider runtime", () =>
+  Effect.gen(function* () {
+    const staleThreadId = ThreadId.make("thread-stale-running");
+    const activeThreadId = ThreadId.make("thread-live-running");
+    const stoppedThreadId = ThreadId.make("thread-already-stopped");
+    const stoppedBindings = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
+    const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+    const now = "2026-08-12T00:00:00.000Z";
+    const makeThread = (threadId: ThreadId, status: "running" | "stopped") =>
+      ({
+        id: threadId,
+        session: {
+          threadId,
+          status,
+          providerName: "codex",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "full-access",
+          activeTurnId: status === "running" ? "turn-active" : null,
+          lastError: null,
+          updatedAt: now,
+        },
+      }) as never;
+
+    yield* ServerRuntimeStartup.reconcileStaleProviderSessions.pipe(
+      Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getShellSnapshot: () =>
+          Effect.succeed({
+            snapshotSequence: 1,
+            projects: [],
+            threads: [
+              makeThread(staleThreadId, "running"),
+              makeThread(activeThreadId, "running"),
+              makeThread(stoppedThreadId, "stopped"),
+            ],
+            updatedAt: now,
+          }),
+        getArchivedShellSnapshot: () =>
+          Effect.succeed({ snapshotSequence: 1, projects: [], threads: [], updatedAt: now }),
+      } as never),
+      Effect.provideService(ProviderService.ProviderService, {
+        listSessions: () => Effect.succeed([{ threadId: activeThreadId } as never]),
+        stopSession: (input: { readonly threadId: ThreadId }) =>
+          Ref.update(stoppedBindings, (threadIds) => [...threadIds, input.threadId]),
+      } as never),
+      Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+        readEvents: () => Stream.empty,
+        dispatch: (command) =>
+          Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+            Effect.as({ sequence: 2 }),
+          ),
+        streamDomainEvents: Stream.empty,
+        latestSequence: Effect.succeed(1),
+      }),
+      Effect.provide(NodeServices.layer),
+    );
+
+    assert.deepStrictEqual(yield* Ref.get(stoppedBindings), [staleThreadId]);
+    const commands = yield* Ref.get(dispatched);
+    assert.equal(commands.length, 1);
+    const command = commands[0] as {
+      readonly type: string;
+      readonly threadId: ThreadId;
+      readonly session: { readonly status: string; readonly activeTurnId: string | null };
+    };
+    assert.equal(command.type, "thread.session.set");
+    assert.equal(command.threadId, staleThreadId);
+    assert.equal(command.session.status, "stopped");
+    assert.equal(command.session.activeTurnId, null);
+  }),
 );
 
 it.effect("resolveWelcomeBase derives cwd and project name from server config", () =>

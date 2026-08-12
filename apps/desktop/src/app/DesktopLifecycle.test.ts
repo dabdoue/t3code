@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Ref from "effect/Ref";
+import { vi } from "vite-plus/test";
 
 import type * as Electron from "electron";
 
@@ -17,12 +18,13 @@ describe("DesktopLifecycle", () => {
   for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
     it.effect(`lets the updater's quit event proceed on ${platform}`, () => {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const quit = vi.fn();
 
       const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
         metadata: Effect.die("unexpected metadata read"),
         name: Effect.succeed("T3 Code"),
         whenReady: Effect.void,
-        quit: Effect.void,
+        quit: Effect.sync(quit),
         exit: () => Effect.void,
         relaunch: () => Effect.void,
         setPath: () => Effect.void,
@@ -100,6 +102,14 @@ describe("DesktopLifecycle", () => {
         Effect.gen(function* () {
           const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
           yield* lifecycle.register;
+
+          appListeners.get("window-all-closed")?.();
+          yield* Effect.yieldNow;
+          assert.equal(
+            quit.mock.calls.length,
+            0,
+            "closing every window must keep the backend alive",
+          );
 
           appListeners.get("before-quit-for-update")?.();
 

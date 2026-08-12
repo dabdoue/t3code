@@ -34,6 +34,7 @@ import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
+import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import {
@@ -162,6 +163,72 @@ export const launchStartupHeartbeat = recordStartupHeartbeat.pipe(
   Effect.forkScoped,
   Effect.asVoid,
 );
+
+/**
+ * Provider child processes cannot survive a full server shutdown. Reconcile
+ * projected live sessions against the bindings reported by the new runtime so
+ * clients never hydrate stale running state after a restart.
+ */
+export const reconcileStaleProviderSessions = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
+  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const providerService = yield* ProviderService.ProviderService;
+
+  const [activeSnapshot, archivedSnapshot, activeProviderSessions] = yield* Effect.all([
+    projectionSnapshotQuery.getShellSnapshot(),
+    projectionSnapshotQuery.getArchivedShellSnapshot(),
+    providerService.listSessions(),
+  ]);
+  const activeThreadIds = new Set(activeProviderSessions.map((session) => session.threadId));
+  const staleThreads = [...activeSnapshot.threads, ...archivedSnapshot.threads].filter(
+    (thread) =>
+      thread.session !== null &&
+      thread.session.status !== "stopped" &&
+      !activeThreadIds.has(thread.id),
+  );
+
+  yield* Effect.forEach(
+    staleThreads,
+    (thread) =>
+      Effect.gen(function* () {
+        const session = thread.session;
+        if (session === null) return;
+
+        yield* providerService.stopSession({ threadId: thread.id }).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to stop stale provider binding during startup", {
+              threadId: thread.id,
+              cause,
+            }),
+          ),
+        );
+
+        const updatedAt = DateTime.formatIso(yield* DateTime.now);
+        yield* orchestrationEngine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(
+            `server:startup-session-reconcile:${thread.id}:${yield* crypto.randomUUIDv4}`,
+          ),
+          threadId: thread.id,
+          session: {
+            ...session,
+            status: "stopped",
+            activeTurnId: null,
+            updatedAt,
+          },
+          createdAt: updatedAt,
+        });
+      }),
+    { concurrency: 1 },
+  );
+
+  if (staleThreads.length > 0) {
+    yield* Effect.logInfo("reconciled stale provider sessions during startup", {
+      sessionCount: staleThreads.length,
+    });
+  }
+});
 
 export const getAutoBootstrapDefaultModelSelection = (): ModelSelection => ({
   instanceId: ProviderInstanceId.make("codex"),
@@ -344,6 +411,9 @@ export const make = (options?: StartupOptions) =>
           ),
         ),
       );
+
+      yield* Effect.logDebug("startup phase: reconciling stale provider sessions");
+      yield* runStartupPhase("provider-sessions.reconcile", reconcileStaleProviderSessions);
 
       yield* Effect.logDebug("startup phase: parking orchestration roots at activation");
       yield* runStartupPhase(
