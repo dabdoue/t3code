@@ -5,8 +5,10 @@ import {
   type SharedQueuedThreadMessage,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
@@ -45,7 +47,7 @@ function sortMessages(messages: ReadonlyArray<SharedQueuedThreadMessage>) {
   });
 }
 
-export interface ThreadQueue {
+export interface ThreadQueueShape {
   readonly snapshot: Effect.Effect<ThreadQueueSnapshot>;
   readonly upsert: (
     message: SharedQueuedThreadMessage,
@@ -68,6 +70,10 @@ export interface ThreadQueue {
   ) => Effect.Effect<ThreadQueueSnapshot, ThreadQueueError>;
   readonly hold: (
     threadId: ThreadId,
+    held: boolean,
+  ) => Effect.Effect<ThreadQueueSnapshot, ThreadQueueError>;
+  readonly holdThreads: (
+    threadIds: ReadonlyArray<ThreadId>,
     held: boolean,
   ) => Effect.Effect<ThreadQueueSnapshot, ThreadQueueError>;
   readonly subscribe: Effect.Effect<
@@ -136,6 +142,20 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const holdThreads: ThreadQueueShape["holdThreads"] = (threadIds, held) =>
+    mutate((current) => {
+      const targetThreadIds = new Set(threadIds);
+      return {
+        messages: current.messages,
+        heldThreadIds: held
+          ? [
+              ...current.heldThreadIds.filter((threadId) => !targetThreadIds.has(threadId)),
+              ...targetThreadIds,
+            ]
+          : current.heldThreadIds.filter((threadId) => !targetThreadIds.has(threadId)),
+      };
+    });
+
   return {
     snapshot: Ref.get(state),
     upsert: (message) =>
@@ -194,13 +214,8 @@ export const make = Effect.gen(function* () {
         ),
         heldThreadIds: current.heldThreadIds,
       })),
-    hold: (threadId, held) =>
-      mutate((current) => ({
-        messages: current.messages,
-        heldThreadIds: held
-          ? [...current.heldThreadIds.filter((candidate) => candidate !== threadId), threadId]
-          : current.heldThreadIds.filter((candidate) => candidate !== threadId),
-      })),
+    hold: (threadId, held) => holdThreads([threadId], held),
+    holdThreads,
     subscribe: mutex.withPermits(1)(
       Effect.gen(function* () {
         const subscription = yield* PubSub.subscribe(changes);
@@ -210,5 +225,11 @@ export const make = Effect.gen(function* () {
         };
       }),
     ),
-  } satisfies ThreadQueue;
+  } satisfies ThreadQueueShape;
 });
+
+export class ThreadQueue extends Context.Service<ThreadQueue, ThreadQueueShape>()(
+  "t3/threadQueue",
+) {}
+
+export const layer = Layer.effect(ThreadQueue, make);

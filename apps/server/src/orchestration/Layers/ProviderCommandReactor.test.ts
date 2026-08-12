@@ -594,7 +594,7 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
-  effectIt.effect("replays persisted queued turn starts in order when the reactor restarts", () =>
+  effectIt.effect("keeps persisted queued turn starts idle when the reactor restarts", () =>
     Effect.gen(function* () {
       const harness = yield* Effect.promise(() => createHarness({ startReactor: false }));
       const now = "2026-01-01T00:00:00.000Z";
@@ -630,16 +630,15 @@ describe("ProviderCommandReactor", () => {
 
       expect(harness.sendTurn).not.toHaveBeenCalled();
       yield* Effect.promise(harness.startReactor);
-      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
-      expect(harness.sendTurn.mock.calls.map(([input]) => input)).toEqual([
-        expect.objectContaining({
-          threadId: ThreadId.make("thread-1"),
-          input: "resume this queued request",
-        }),
-        expect.objectContaining({
-          threadId: ThreadId.make("thread-1"),
-          input: "then run this second queued request",
-        }),
+      yield* Effect.promise(harness.drain);
+      expect(harness.startSession).not.toHaveBeenCalled();
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+
+      const readModel = yield* Effect.promise(harness.readModel);
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      expect(thread?.messages.map((message) => message.text)).toEqual([
+        "resume this queued request",
+        "then run this second queued request",
       ]);
     }),
   );

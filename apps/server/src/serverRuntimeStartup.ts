@@ -37,6 +37,7 @@ import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReape
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
+import * as ThreadQueue from "./threadQueue.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -174,12 +175,15 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const providerService = yield* ProviderService.ProviderService;
+  const threadQueue = yield* ThreadQueue.ThreadQueue;
 
-  const [activeSnapshot, archivedSnapshot, activeProviderSessions] = yield* Effect.all([
-    projectionSnapshotQuery.getShellSnapshot(),
-    projectionSnapshotQuery.getArchivedShellSnapshot(),
-    providerService.listSessions(),
-  ]);
+  const [activeSnapshot, archivedSnapshot, activeProviderSessions, queueSnapshot] =
+    yield* Effect.all([
+      projectionSnapshotQuery.getShellSnapshot(),
+      projectionSnapshotQuery.getArchivedShellSnapshot(),
+      providerService.listSessions(),
+      threadQueue.snapshot,
+    ]);
   const activeThreadIds = new Set(activeProviderSessions.map((session) => session.threadId));
   const staleThreads = [...activeSnapshot.threads, ...archivedSnapshot.threads].filter(
     (thread) =>
@@ -187,6 +191,16 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
       thread.session.status !== "stopped" &&
       !activeThreadIds.has(thread.id),
   );
+  const queuedThreadIds = new Set(queueSnapshot.messages.map((message) => message.threadId));
+  const staleQueuedThreadIds = staleThreads
+    .map((thread) => thread.id)
+    .filter((threadId) => queuedThreadIds.has(threadId));
+
+  if (staleQueuedThreadIds.length > 0) {
+    // A process death is the same interruption boundary as pressing Stop:
+    // preserve queued work, but require an explicit steer before it can run.
+    yield* threadQueue.holdThreads(staleQueuedThreadIds, true);
+  }
 
   yield* Effect.forEach(
     staleThreads,
@@ -226,6 +240,7 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
   if (staleThreads.length > 0) {
     yield* Effect.logInfo("reconciled stale provider sessions during startup", {
       sessionCount: staleThreads.length,
+      heldQueueCount: staleQueuedThreadIds.length,
     });
   }
 });

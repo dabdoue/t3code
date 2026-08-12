@@ -352,7 +352,7 @@ function toAuthAccessStreamEvent(
 const makeWsRpcLayer = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
-  threadQueue: ThreadQueue.ThreadQueue,
+  threadQueue: ThreadQueue.ThreadQueue["Service"],
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -2250,7 +2250,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
-    const threadQueue = yield* ThreadQueue.make;
+    const threadQueue = yield* ThreadQueue.ThreadQueue;
     return HttpRouter.add(
       "GET",
       "/ws",
