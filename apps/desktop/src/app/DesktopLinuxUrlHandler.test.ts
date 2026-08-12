@@ -107,6 +107,7 @@ describe("DesktopLinuxUrlHandler", () => {
     const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
       displayName: "T3 Code (Nightly)",
       execTarget: '/home/al ice/Apps/T3 "100%" $HOME\\x.AppImage',
+      execArguments: ["--no-sandbox"],
       scheme: "t3code",
     });
 
@@ -117,11 +118,22 @@ describe("DesktopLinuxUrlHandler", () => {
     // backslashes plus the sign.
     assert.include(
       entry,
-      'Exec="/home/al ice/Apps/T3 \\\\"100%%\\\\" \\\\$HOME\\\\\\\\x.AppImage" %U',
+      'Exec="/home/al ice/Apps/T3 \\\\"100%%\\\\" \\\\$HOME\\\\\\\\x.AppImage" "--no-sandbox" %U',
     );
     assert.include(entry, "NoDisplay=true");
     assert.notInclude(entry, "StartupWMClass=");
     assert.include(entry, "MimeType=x-scheme-handler/t3code;");
+  });
+
+  it("omits optional launch arguments when the primary instance did not need them", () => {
+    const entry = DesktopLinuxUrlHandler.renderUrlHandlerDesktopEntry({
+      displayName: "T3 Code (Alpha)",
+      execTarget: "/home/alice/Applications/T3-Code.AppImage",
+      scheme: "t3code",
+    });
+
+    assert.include(entry, 'Exec="/home/alice/Applications/T3-Code.AppImage" %U');
+    assert.notInclude(entry, "--no-sandbox");
   });
 
   it("carries structured context on registration errors", () => {
