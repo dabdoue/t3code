@@ -150,6 +150,7 @@ describe("ProviderCommandReactor", () => {
     readonly requiresNewThreadForModelChange?: boolean;
     readonly titleRegenerationCompletionDispatchFailures?: number;
     readonly titleRegenerationBeforeStart?: "one" | "two";
+    readonly startReactor?: boolean;
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderAdapterRequestError>;
@@ -388,6 +389,7 @@ describe("ProviderCommandReactor", () => {
       }),
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
+      Layer.provide(SqlitePersistenceMemory),
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
@@ -486,7 +488,8 @@ describe("ProviderCommandReactor", () => {
     }
 
     scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
+    const startReactor = () => Effect.runPromise(reactor.start().pipe(Scope.provide(scope!)));
+    if (input?.startReactor !== false) await startReactor();
     const drain = () => Effect.runPromise(reactor.drain);
 
     return {
@@ -506,6 +509,7 @@ describe("ProviderCommandReactor", () => {
       stateDir,
       drain,
       runEffect,
+      startReactor,
       get titleRegenerationCompletionDispatchAttempts() {
         return titleRegenerationCompletionDispatchAttempts;
       },
@@ -587,6 +591,56 @@ describe("ProviderCommandReactor", () => {
 
       yield* Deferred.succeed(releaseStart, undefined);
       yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+    }),
+  );
+
+  effectIt.effect("replays persisted queued turn starts in order when the reactor restarts", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness({ startReactor: false }));
+      const now = "2026-01-01T00:00:00.000Z";
+
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-reactor"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-reactor"),
+          role: "user",
+          text: "resume this queued request",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-before-reactor-2"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-before-reactor-2"),
+          role: "user",
+          text: "then run this second queued request",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: "2026-01-01T00:00:01.000Z",
+      });
+
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      yield* Effect.promise(harness.startReactor);
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+      expect(harness.sendTurn.mock.calls.map(([input]) => input)).toEqual([
+        expect.objectContaining({
+          threadId: ThreadId.make("thread-1"),
+          input: "resume this queued request",
+        }),
+        expect.objectContaining({
+          threadId: ThreadId.make("thread-1"),
+          input: "then run this second queued request",
+        }),
+      ]);
     }),
   );
 

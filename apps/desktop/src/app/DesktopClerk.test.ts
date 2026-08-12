@@ -25,7 +25,7 @@ vi.mock("@clerk/electron/storage", () => ({
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as ElectronApp from "../electron/ElectronApp.ts";
-import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
@@ -158,14 +158,19 @@ describe("DesktopClerk", () => {
     createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
     const quit = vi.fn();
     const registeredEvents: string[] = [];
+    let secondInstanceListener: (() => void) | undefined;
+    const activate = vi.fn();
     const electronApp = {
       quit: Effect.sync(quit),
-      on: (eventName: string) =>
+      on: (eventName: string, listener: () => void) =>
         Effect.sync(() => {
           registeredEvents.push(eventName);
+          if (eventName === "second-instance") secondInstanceListener = listener;
         }),
     } as unknown as ElectronApp.ElectronApp["Service"];
-    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
+    const desktopWindow = {
+      activate: Effect.sync(activate),
+    } as unknown as DesktopWindow.DesktopWindow["Service"];
 
     return Effect.gen(function* () {
       const clerk = yield* DesktopClerk.DesktopClerk;
@@ -174,10 +179,14 @@ describe("DesktopClerk", () => {
       assert.isTrue(Exit.isSuccess(exit));
       assert.equal(quit.mock.calls.length, 0);
       assert.deepEqual(registeredEvents, ["second-instance"]);
+      assert.isDefined(secondInstanceListener);
+      secondInstanceListener?.();
+      yield* Effect.yieldNow;
+      assert.equal(activate.mock.calls.length, 1);
     }).pipe(
       Effect.provide(makeDesktopClerkLayer()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
-      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+      Effect.provideService(DesktopWindow.DesktopWindow, desktopWindow),
     );
   });
 
@@ -193,7 +202,7 @@ describe("DesktopClerk", () => {
           registeredEvents.push(eventName);
         }),
     } as unknown as ElectronApp.ElectronApp["Service"];
-    const electronWindow = {} as ElectronWindow.ElectronWindow["Service"];
+    const desktopWindow = {} as DesktopWindow.DesktopWindow["Service"];
 
     return Effect.gen(function* () {
       const clerk = yield* DesktopClerk.DesktopClerk;
@@ -205,7 +214,7 @@ describe("DesktopClerk", () => {
     }).pipe(
       Effect.provide(makeDesktopClerkLayer()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
-      Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+      Effect.provideService(DesktopWindow.DesktopWindow, desktopWindow),
     );
   });
 
