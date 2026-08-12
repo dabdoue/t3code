@@ -16,6 +16,7 @@ import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSna
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import * as ThreadQueue from "./threadQueue.ts";
 
 it("uses the canonical Codex default for auto-bootstrapped model selection", () => {
   assert.deepStrictEqual(ServerRuntimeStartup.getAutoBootstrapDefaultModelSelection(), {
@@ -115,6 +116,7 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
     const activeThreadId = ThreadId.make("thread-live-running");
     const stoppedThreadId = ThreadId.make("thread-already-stopped");
     const stoppedBindings = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
+    const heldQueueThreads = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
     const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
     const now = "2026-08-12T00:00:00.000Z";
     const makeThread = (threadId: ThreadId, status: "running" | "stopped") =>
@@ -153,6 +155,21 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
         stopSession: (input: { readonly threadId: ThreadId }) =>
           Ref.update(stoppedBindings, (threadIds) => [...threadIds, input.threadId]),
       } as never),
+      Effect.provideService(ThreadQueue.ThreadQueue, {
+        snapshot: Effect.succeed({
+          revision: 1,
+          messages: [{ threadId: staleThreadId }],
+          heldThreadIds: [],
+        }),
+        holdThreads: (threadIds: ReadonlyArray<ThreadId>, held: boolean) =>
+          Ref.set(heldQueueThreads, held ? threadIds : []).pipe(
+            Effect.as({
+              revision: 2,
+              messages: [{ threadId: staleThreadId }],
+              heldThreadIds: held ? threadIds : [],
+            }),
+          ),
+      } as never),
       Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
         readEvents: () => Stream.empty,
         dispatch: (command) =>
@@ -166,6 +183,7 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
     );
 
     assert.deepStrictEqual(yield* Ref.get(stoppedBindings), [staleThreadId]);
+    assert.deepStrictEqual(yield* Ref.get(heldQueueThreads), [staleThreadId]);
     const commands = yield* Ref.get(dispatched);
     assert.equal(commands.length, 1);
     const command = commands[0] as {

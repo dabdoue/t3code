@@ -71,6 +71,20 @@ it.layer(NodeServices.layer)("shared thread queue", (it) => {
     ),
   );
 
+  it.effect("holds multiple threads atomically", () =>
+    Effect.gen(function* () {
+      const queue = yield* ThreadQueue.make;
+      const secondThreadId = ThreadId.make("thread-shared-queue-test-2");
+      const held = yield* queue.holdThreads([threadId, secondThreadId], true);
+      expect(held.heldThreadIds).toEqual([threadId, secondThreadId]);
+      expect(held.revision).toBe(1);
+    }).pipe(
+      Effect.provide(
+        ServerConfig.layerTest(process.cwd(), { prefix: "t3code-thread-queue-hold-test-" }),
+      ),
+    ),
+  );
+
   it.effect("reloads durable queue state and clears a deleted thread", () =>
     Effect.scoped(
       Effect.gen(function* () {

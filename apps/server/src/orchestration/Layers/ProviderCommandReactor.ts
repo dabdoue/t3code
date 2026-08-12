@@ -32,8 +32,6 @@ import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
-import { ProjectionTurnRepositoryLive } from "../../persistence/Layers/ProjectionTurns.ts";
-import { ProjectionTurnRepository } from "../../persistence/Services/ProjectionTurns.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import {
@@ -315,7 +313,6 @@ function buildGeneratedWorktreeBranchName(raw: string): string {
 const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const orchestrationEngine = yield* OrchestrationEngineService;
-  const projectionTurnRepository = yield* ProjectionTurnRepository;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerService = yield* ProviderService;
   const providerRegistry = yield* ProviderRegistry;
@@ -1390,52 +1387,6 @@ const make = Effect.gen(function* () {
 
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
-  const replayPendingTurnStarts = Effect.fn("replayPendingTurnStarts")(function* () {
-    const pendingStarts = yield* projectionTurnRepository.listPendingTurnStarts();
-    if (pendingStarts.length === 0) return;
-
-    const pendingByKey = new Map<string, (typeof pendingStarts)[number]>(
-      pendingStarts.map(
-        (pending) => [`${pending.threadId}\u0000${pending.messageId}`, pending] as const,
-      ),
-    );
-    const matchedEvents = new Map<
-      string,
-      Extract<ProviderIntentEvent, { type: "thread.turn-start-requested" }>
-    >();
-    const firstKnownSequence = pendingStarts.some((pending) => pending.eventSequence === null)
-      ? null
-      : pendingStarts.reduce<number | null>(
-          (minimum, pending) =>
-            pending.eventSequence === null
-              ? minimum
-              : minimum === null
-                ? pending.eventSequence
-                : Math.min(minimum, pending.eventSequence),
-          null,
-        );
-    const replayFromExclusive =
-      firstKnownSequence === null ? 0 : Math.max(0, firstKnownSequence - 1);
-
-    yield* Stream.runForEach(orchestrationEngine.readEvents(replayFromExclusive), (event) => {
-      if (event.type !== "thread.turn-start-requested") return Effect.void;
-      const key = `${event.payload.threadId}\u0000${event.payload.messageId}`;
-      if (!pendingByKey.has(key)) return Effect.void;
-      matchedEvents.set(key, event);
-      return Effect.void;
-    });
-
-    const orderedEvents = Array.from(matchedEvents.values()).toSorted(
-      (left, right) => left.sequence - right.sequence,
-    );
-    yield* Effect.forEach(orderedEvents, worker.enqueue, { concurrency: 1 });
-    yield* Effect.logInfo("provider command reactor replayed pending turn starts", {
-      pendingCount: pendingStarts.length,
-      replayedCount: orderedEvents.length,
-      replayFromExclusive,
-    });
-  });
-
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
     const interruptedTitleRegenerations = yield* findInterruptedThreadTitleRegenerations().pipe(
       Effect.catchCause((cause) => {
@@ -1482,17 +1433,7 @@ const make = Effect.gen(function* () {
         );
       }),
     );
-    const recoverPendingWork = clearInterrupted.pipe(
-      Effect.andThen(
-        replayPendingTurnStarts().pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("provider command reactor failed to replay pending turn starts", {
-              cause: Cause.pretty(cause),
-            }),
-          ),
-        ),
-      ),
-    );
+    const recoverPendingWork = clearInterrupted;
     const activation = yield* ServerActivation;
     if (activation === undefined) {
       yield* recoverPendingWork;
@@ -1510,6 +1451,4 @@ const make = Effect.gen(function* () {
   } satisfies ProviderCommandReactorShape;
 });
 
-export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make).pipe(
-  Layer.provide(ProjectionTurnRepositoryLive),
-);
+export const ProviderCommandReactorLive = Layer.effect(ProviderCommandReactor, make);
