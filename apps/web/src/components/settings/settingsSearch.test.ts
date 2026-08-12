@@ -47,6 +47,9 @@ describe("searchSettings", () => {
     expect(searchSettings("  WORD   WRAP  ", ITEMS).map((item) => item.id)).toEqual(["word-wrap"]);
     expect(searchSettings("glass").map((item) => item.id)).toEqual(["setting-glass-opacity"]);
     expect(searchSettings("xyzzy")).toEqual([]);
+    expect(searchSettings("messages while").map((item) => item.id)).toEqual([
+      "messages-while-working",
+    ]);
   });
 
   it("keeps catalog order for multiple title matches", () => {

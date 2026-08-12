@@ -103,6 +103,9 @@ export const DEFAULT_TERMINAL_FONT_SIZE: TerminalFontSize = 12;
 export const EnvironmentIdentificationMode = Schema.Literals(["artwork", "pill", "none"]);
 export type EnvironmentIdentificationMode = typeof EnvironmentIdentificationMode.Type;
 export const DEFAULT_ENVIRONMENT_IDENTIFICATION_MODE: EnvironmentIdentificationMode = "artwork";
+export const ActiveTurnMessageBehavior = Schema.Literals(["steer", "queue"]);
+export type ActiveTurnMessageBehavior = typeof ActiveTurnMessageBehavior.Type;
+export const DEFAULT_ACTIVE_TURN_MESSAGE_BEHAVIOR: ActiveTurnMessageBehavior = "queue";
 
 /**
  * A user-chosen font family (a single name or a comma-separated list). Empty
