@@ -70,13 +70,15 @@ export function escapeDesktopEntryExecArgument(value: string): string {
 export function renderUrlHandlerDesktopEntry(input: {
   readonly displayName: string;
   readonly execTarget: string;
+  readonly execArguments?: ReadonlyArray<string>;
   readonly scheme: string;
 }): string {
+  const execArguments = (input.execArguments ?? []).map(escapeDesktopEntryExecArgument).join(" ");
   return [
     "[Desktop Entry]",
     "Type=Application",
     `Name=${escapeDesktopEntryString(input.displayName)}`,
-    `Exec=${escapeDesktopEntryExecArgument(input.execTarget)} %U`,
+    `Exec=${escapeDesktopEntryExecArgument(input.execTarget)}${execArguments ? ` ${execArguments}` : ""} %U`,
     "Terminal=false",
     "NoDisplay=true",
     "StartupNotify=false",
@@ -113,6 +115,12 @@ export const make = Effect.gen(function* () {
       renderUrlHandlerDesktopEntry({
         displayName: environment.displayName,
         execTarget,
+        // AppImageLauncher commonly starts Electron with --no-sandbox when
+        // the embedded chrome-sandbox is not installed setuid. A protocol
+        // activation starts a second instance, so it must preserve that flag
+        // or the OAuth callback process exits before Clerk can forward the
+        // deep link to the primary instance.
+        execArguments: process.argv.includes("--no-sandbox") ? ["--no-sandbox"] : [],
         scheme,
       }),
     );
