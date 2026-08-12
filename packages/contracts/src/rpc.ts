@@ -165,8 +165,20 @@ import {
   SourceControlRepositoryLookupInput,
 } from "./sourceControl.ts";
 import { VcsError } from "./vcs.ts";
+import {
+  THREAD_QUEUE_WS_METHODS,
+  ThreadQueueError,
+  ThreadQueueHoldInput,
+  ThreadQueuePauseInput,
+  ThreadQueuePromoteInput,
+  ThreadQueueRemoveInput,
+  ThreadQueueReorderInput,
+  ThreadQueueSnapshot,
+  ThreadQueueUpsertInput,
+} from "./threadQueue.ts";
 
 export const WS_METHODS = {
+  ...THREAD_QUEUE_WS_METHODS,
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -696,6 +708,43 @@ export const WsSubscribeDiscoveredLocalServersRpc = Rpc.make(
   },
 );
 
+export const WsThreadQueueUpsertRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.upsert, {
+  payload: ThreadQueueUpsertInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueueRemoveRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.remove, {
+  payload: ThreadQueueRemoveInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueueReorderRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.reorder, {
+  payload: ThreadQueueReorderInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueuePromoteRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.promote, {
+  payload: ThreadQueuePromoteInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueuePauseRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.pause, {
+  payload: ThreadQueuePauseInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueueHoldRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.hold, {
+  payload: ThreadQueueHoldInput,
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+});
+export const WsThreadQueueSubscribeRpc = Rpc.make(THREAD_QUEUE_WS_METHODS.subscribe, {
+  payload: Schema.Struct({}),
+  success: ThreadQueueSnapshot,
+  error: Schema.Union([ThreadQueueError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+
 export const WsOrchestrationDispatchCommandRpc = Rpc.make(
   ORCHESTRATION_WS_METHODS.dispatchCommand,
   {
@@ -880,6 +929,13 @@ export const WsRpcGroup = RpcGroup.make(
   WsPreviewAutomationFocusHostRpc,
   WsSubscribePreviewEventsRpc,
   WsSubscribeDiscoveredLocalServersRpc,
+  WsThreadQueueUpsertRpc,
+  WsThreadQueueRemoveRpc,
+  WsThreadQueueReorderRpc,
+  WsThreadQueuePromoteRpc,
+  WsThreadQueuePauseRpc,
+  WsThreadQueueHoldRpc,
+  WsThreadQueueSubscribeRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,

@@ -243,6 +243,7 @@ import {
   useThreadShell,
 } from "../state/entities";
 import { environmentShell } from "../state/shell";
+import { threadQueueEnvironment } from "../state/threadQueue";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
@@ -1222,6 +1223,16 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const sharedQueueUpsert = useAtomCommand(threadQueueEnvironment.upsert, { reportFailure: false });
+  const sharedQueueRemove = useAtomCommand(threadQueueEnvironment.remove, { reportFailure: false });
+  const sharedQueueReorder = useAtomCommand(threadQueueEnvironment.reorder, {
+    reportFailure: false,
+  });
+  const sharedQueuePromote = useAtomCommand(threadQueueEnvironment.promote, {
+    reportFailure: false,
+  });
+  const sharedQueuePause = useAtomCommand(threadQueueEnvironment.pause, { reportFailure: false });
+  const sharedQueueHold = useAtomCommand(threadQueueEnvironment.hold, { reportFailure: false });
   const openPreview = useAtomCommand(previewEnvironment.open, { reportFailure: false });
   const closePreview = useAtomCommand(previewEnvironment.close, "preview close");
   const { environments } = useEnvironments();
@@ -1953,6 +1964,8 @@ function ChatViewContent(props: ChatViewProps) {
   const serverConfig = activeThread
     ? (activeEnvironment?.serverConfig ?? null)
     : (primaryEnvironment?.serverConfig ?? null);
+  const supportsSharedThreadQueue =
+    serverConfig?.environment.capabilities.sharedThreadQueue === true;
   const versionMismatch = resolveServerConfigVersionMismatch(serverConfig);
   const versionMismatchDismissKey =
     versionMismatch && activeThread
@@ -5046,7 +5059,7 @@ function ChatViewContent(props: ChatViewProps) {
       const messageId = newMessageId();
       const createdAt = new Date().toISOString();
       const outboxStore = useWebThreadOutboxStore.getState();
-      let { durable } = outboxStore.enqueue({
+      const queuedMessage = {
         environmentId,
         threadId: threadIdForSend,
         messageId,
@@ -5060,19 +5073,57 @@ function ChatViewContent(props: ChatViewProps) {
         activeTurnMessageBehavior:
           editingQueuedMessage === null ? settings.activeTurnMessageBehavior : "queue",
         createdAt,
-      });
+      } as const;
+      let durable: boolean;
+      if (supportsSharedThreadQueue) {
+        const { environmentId: _environmentId, ...sharedMessage } = queuedMessage;
+        const result = await sharedQueueUpsert({
+          environmentId,
+          input: { message: { ...sharedMessage, paused: false } },
+        });
+        if (result._tag !== "Success") {
+          restoreComposerDraftContent(composerDraftTarget, composerContentSnapshot);
+          if (!isAtomCommandInterrupted(result)) {
+            const error = squashAtomCommandFailure(result);
+            setThreadError(
+              threadIdForSend,
+              error instanceof Error ? error.message : "Failed to save the shared queued message.",
+            );
+          }
+          sendInFlightRef.current = false;
+          return;
+        }
+        outboxStore.replaceEnvironmentSnapshot(environmentId, result.value);
+        durable = true;
+      } else {
+        durable = outboxStore.enqueue(queuedMessage).durable;
+      }
       if (editingQueuedMessage !== null) {
         const queuedMessageIds = (
           outboxStore.queuesByThreadKey[webThreadOutboxKey(environmentId, threadIdForSend)] ?? []
         )
           .map((message) => message.messageId)
           .filter((queuedMessageId) => queuedMessageId !== messageId);
-        const reorderResult = outboxStore.reorder(
-          environmentId,
-          threadIdForSend,
-          insertEditedQueuedMessage(queuedMessageIds, messageId, editingQueuedMessage),
+        const orderedMessageIds = insertEditedQueuedMessage(
+          queuedMessageIds,
+          messageId,
+          editingQueuedMessage,
         );
-        durable = durable && reorderResult.durable;
+        if (supportsSharedThreadQueue) {
+          const reorderResult = await sharedQueueReorder({
+            environmentId,
+            input: { threadId: threadIdForSend, orderedMessageIds },
+          });
+          if (reorderResult._tag === "Success") {
+            outboxStore.replaceEnvironmentSnapshot(environmentId, reorderResult.value);
+          } else {
+            durable = false;
+          }
+        } else {
+          durable =
+            outboxStore.reorder(environmentId, threadIdForSend, orderedMessageIds).durable &&
+            durable;
+        }
         setEditingQueuedMessage(null);
       }
       setThreadError(threadIdForSend, null);
@@ -5369,12 +5420,26 @@ function ChatViewContent(props: ChatViewProps) {
 
   const promoteQueuedMessageToSteer = useCallback(
     (messageId: MessageId) => {
+      if (supportsSharedThreadQueue) {
+        void sharedQueuePromote({
+          environmentId,
+          input: { messageId, requestedAt: new Date().toISOString() },
+        }).then((result) => {
+          if (result._tag === "Success") {
+            useWebThreadOutboxStore
+              .getState()
+              .replaceEnvironmentSnapshot(environmentId, result.value);
+            setThreadError(props.threadId, null);
+          }
+        });
+        return;
+      }
       const result = useWebThreadOutboxStore
         .getState()
         .promoteToSteer(messageId, new Date().toISOString());
       if (result.found) setThreadError(props.threadId, null);
     },
-    [props.threadId, setThreadError],
+    [environmentId, props.threadId, setThreadError, sharedQueuePromote, supportsSharedThreadQueue],
   );
 
   const removeQueuedMessage = useCallback(
@@ -5385,22 +5450,45 @@ function ChatViewContent(props: ChatViewProps) {
           (candidate) => candidate.messageId === messageId,
         ) ?? null;
       if (!message) return;
+      if (supportsSharedThreadQueue) {
+        void sharedQueueRemove({ environmentId, input: { messageId } }).then((result) => {
+          if (result._tag === "Success") {
+            store.replaceEnvironmentSnapshot(environmentId, result.value);
+            setThreadError(message.threadId, null);
+          }
+        });
+        return;
+      }
       store.remove(message);
       setThreadError(message.threadId, null);
     },
-    [environmentId, props.threadId, setThreadError],
+    [environmentId, props.threadId, setThreadError, sharedQueueRemove, supportsSharedThreadQueue],
   );
 
   const retryQueuedMessage = useCallback(
     (messageId: MessageId) => {
+      if (supportsSharedThreadQueue) {
+        void sharedQueuePause({
+          environmentId,
+          input: { messageId, paused: false },
+        }).then((result) => {
+          if (result._tag === "Success") {
+            useWebThreadOutboxStore
+              .getState()
+              .replaceEnvironmentSnapshot(environmentId, result.value);
+            setThreadError(props.threadId, null);
+          }
+        });
+        return;
+      }
       useWebThreadOutboxStore.getState().retry(messageId);
       setThreadError(props.threadId, null);
     },
-    [props.threadId, setThreadError],
+    [environmentId, props.threadId, setThreadError, sharedQueuePause, supportsSharedThreadQueue],
   );
 
   const editQueuedMessage = useCallback(
-    (messageId: MessageId) => {
+    async (messageId: MessageId) => {
       const store = useWebThreadOutboxStore.getState();
       const messages =
         store.queuesByThreadKey[webThreadOutboxKey(environmentId, props.threadId)] ?? [];
@@ -5415,7 +5503,13 @@ function ChatViewContent(props: ChatViewProps) {
           id: `${message.messageId}:attachment:${attachmentIndex}`,
         })),
       );
-      store.remove(message);
+      if (supportsSharedThreadQueue) {
+        const result = await sharedQueueRemove({ environmentId, input: { messageId } });
+        if (result._tag !== "Success") return;
+        store.replaceEnvironmentSnapshot(environmentId, result.value);
+      } else {
+        store.remove(message);
+      }
       setEditingQueuedMessage({
         previousMessageId: messages[messageIndex - 1]?.messageId ?? null,
         nextMessageId: messages[messageIndex + 1]?.messageId ?? null,
@@ -5449,20 +5543,47 @@ function ChatViewContent(props: ChatViewProps) {
       setComposerDraftModelSelection,
       setComposerDraftRuntimeMode,
       setThreadError,
+      sharedQueueRemove,
+      supportsSharedThreadQueue,
     ],
   );
 
   const reorderQueuedMessages = useCallback(
     (orderedMessageIds: ReadonlyArray<MessageId>) => {
+      if (supportsSharedThreadQueue) {
+        void sharedQueueReorder({
+          environmentId,
+          input: { threadId: props.threadId, orderedMessageIds },
+        }).then((result) => {
+          if (result._tag === "Success") {
+            useWebThreadOutboxStore
+              .getState()
+              .replaceEnvironmentSnapshot(environmentId, result.value);
+          }
+        });
+        return;
+      }
       useWebThreadOutboxStore.getState().reorder(environmentId, props.threadId, orderedMessageIds);
     },
-    [environmentId, props.threadId],
+    [environmentId, props.threadId, sharedQueueReorder, supportsSharedThreadQueue],
   );
 
   const onInterrupt = async () => {
     if (!activeThread) return;
     const outboxStore = useWebThreadOutboxStore.getState();
-    const holdApplied = outboxStore.holdThread(environmentId, activeThread.id).changed;
+    let holdApplied = false;
+    if (supportsSharedThreadQueue && activeThreadOutboxQueue.length > 0) {
+      const holdResult = await sharedQueueHold({
+        environmentId,
+        input: { threadId: activeThread.id, held: true },
+      });
+      if (holdResult._tag === "Success") {
+        outboxStore.replaceEnvironmentSnapshot(environmentId, holdResult.value);
+        holdApplied = true;
+      }
+    } else {
+      holdApplied = outboxStore.holdThread(environmentId, activeThread.id).changed;
+    }
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
@@ -5475,7 +5596,17 @@ function ChatViewContent(props: ChatViewProps) {
       );
     }
     if (result._tag === "Failure" && holdApplied) {
-      outboxStore.releaseThread(environmentId, activeThread.id);
+      if (supportsSharedThreadQueue) {
+        const releaseResult = await sharedQueueHold({
+          environmentId,
+          input: { threadId: activeThread.id, held: false },
+        });
+        if (releaseResult._tag === "Success") {
+          outboxStore.replaceEnvironmentSnapshot(environmentId, releaseResult.value);
+        }
+      } else {
+        outboxStore.releaseThread(environmentId, activeThread.id);
+      }
     }
   };
 

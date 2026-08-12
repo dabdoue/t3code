@@ -31,6 +31,7 @@ import {
   OrchestrationSearchThreadsError,
   OrchestrationGetTurnDiffError,
   ORCHESTRATION_WS_METHODS,
+  THREAD_QUEUE_WS_METHODS,
   type ProjectId,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
@@ -84,6 +85,7 @@ import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
+import * as ThreadQueue from "./threadQueue.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -350,6 +352,7 @@ function toAuthAccessStreamEvent(
 const makeWsRpcLayer = (
   currentSession: EnvironmentAuth.AuthenticatedSession,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  threadQueue: ThreadQueue.ThreadQueue,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -1031,6 +1034,44 @@ const makeWsRpcLayer = (
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
       return WsRpcGroup.of({
+        [THREAD_QUEUE_WS_METHODS.upsert]: ({ message }) =>
+          observeRpcEffect(THREAD_QUEUE_WS_METHODS.upsert, threadQueue.upsert(message), {
+            "rpc.aggregate": "threadQueue",
+          }),
+        [THREAD_QUEUE_WS_METHODS.remove]: ({ messageId }) =>
+          observeRpcEffect(THREAD_QUEUE_WS_METHODS.remove, threadQueue.remove(messageId), {
+            "rpc.aggregate": "threadQueue",
+          }),
+        [THREAD_QUEUE_WS_METHODS.reorder]: ({ threadId, orderedMessageIds }) =>
+          observeRpcEffect(
+            THREAD_QUEUE_WS_METHODS.reorder,
+            threadQueue.reorder(threadId, orderedMessageIds),
+            { "rpc.aggregate": "threadQueue" },
+          ),
+        [THREAD_QUEUE_WS_METHODS.promote]: ({ messageId, requestedAt }) =>
+          observeRpcEffect(
+            THREAD_QUEUE_WS_METHODS.promote,
+            threadQueue.promote(messageId, requestedAt),
+            { "rpc.aggregate": "threadQueue" },
+          ),
+        [THREAD_QUEUE_WS_METHODS.pause]: ({ messageId, paused }) =>
+          observeRpcEffect(THREAD_QUEUE_WS_METHODS.pause, threadQueue.pause(messageId, paused), {
+            "rpc.aggregate": "threadQueue",
+          }),
+        [THREAD_QUEUE_WS_METHODS.hold]: ({ threadId, held }) =>
+          observeRpcEffect(THREAD_QUEUE_WS_METHODS.hold, threadQueue.hold(threadId, held), {
+            "rpc.aggregate": "threadQueue",
+          }),
+        [THREAD_QUEUE_WS_METHODS.subscribe]: (_input) =>
+          observeRpcStream(
+            THREAD_QUEUE_WS_METHODS.subscribe,
+            Stream.unwrap(
+              Effect.map(threadQueue.subscribe, ({ latest, changes }) =>
+                Stream.concat(Stream.make(latest), changes),
+              ),
+            ),
+            { "rpc.aggregate": "threadQueue" },
+          ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
@@ -1069,6 +1110,16 @@ const makeWsRpcLayer = (
                   )
                 : false;
               const result = yield* dispatchNormalizedCommand(normalizedCommand);
+              if (normalizedCommand.type === "thread.delete") {
+                yield* threadQueue.removeThread(normalizedCommand.threadId).pipe(
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("failed to clear queued messages after thread deletion", {
+                      threadId: normalizedCommand.threadId,
+                      cause,
+                    }),
+                  ),
+                );
+              }
               if (parkingCommand) {
                 const parkingKind = parkingCommand.type === "thread.archive" ? "archive" : "settle";
                 if (shouldStopSessionAfterCommand) {
@@ -2199,6 +2250,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const serverSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
+    const threadQueue = yield* ThreadQueue.make;
     return HttpRouter.add(
       "GET",
       "/ws",
@@ -2218,7 +2270,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
           disableTracing: true,
         }).pipe(
           Effect.provide(
-            makeWsRpcLayer(session, previewAutomationBroker).pipe(
+            makeWsRpcLayer(session, previewAutomationBroker, threadQueue).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
