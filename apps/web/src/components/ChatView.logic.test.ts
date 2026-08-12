@@ -23,6 +23,7 @@ import {
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
+  insertEditedQueuedMessage,
   isBranchMismatchDismissedForSession,
   reconcileMountedTerminalThreadIds,
   reconcileRetainedMountedThreadIds,
@@ -33,6 +34,37 @@ import {
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
+
+describe("queued message editing", () => {
+  const message1 = MessageId.make("message-1");
+  const message2 = MessageId.make("message-2");
+  const message3 = MessageId.make("message-3");
+  const editedMessage = MessageId.make("message-edited");
+
+  it("restores an edited message before its surviving next neighbor", () => {
+    expect(
+      insertEditedQueuedMessage([message1, message3], editedMessage, {
+        previousMessageId: message1,
+        nextMessageId: message3,
+      }),
+    ).toEqual([message1, editedMessage, message3]);
+  });
+
+  it("falls back to the previous neighbor or queue tail", () => {
+    expect(
+      insertEditedQueuedMessage([message1, message2], editedMessage, {
+        previousMessageId: message1,
+        nextMessageId: message3,
+      }),
+    ).toEqual([message1, editedMessage, message2]);
+    expect(
+      insertEditedQueuedMessage([message1], editedMessage, {
+        previousMessageId: message2,
+        nextMessageId: message3,
+      }),
+    ).toEqual([message1, editedMessage]);
+  });
+});
 
 const environmentId = EnvironmentId.make("environment-local");
 const projectId = ProjectId.make("project-1");

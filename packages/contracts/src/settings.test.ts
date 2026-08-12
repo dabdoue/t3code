@@ -68,8 +68,8 @@ describe("ClientSettings environment identification", () => {
 });
 
 describe("ClientSettings messages while working", () => {
-  it("defaults to steering and accepts both delivery behaviors", () => {
-    expect(decodeClientSettings({}).activeTurnMessageBehavior).toBe("steer");
+  it("defaults to queueing and accepts both delivery behaviors", () => {
+    expect(decodeClientSettings({}).activeTurnMessageBehavior).toBe("queue");
     expect(
       decodeClientSettingsPatch({ activeTurnMessageBehavior: "steer" }).activeTurnMessageBehavior,
     ).toBe("steer");

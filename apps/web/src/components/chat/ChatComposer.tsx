@@ -514,8 +514,6 @@ export interface ChatComposerProps {
   isSendBusy: boolean;
   sendDisabledReason: string | null;
   isPreparingWorktree: boolean;
-  queuedMessageCount: number;
-  queuedMessagesPaused: boolean;
   environmentUnavailable: {
     readonly label: string;
     readonly connection: EnvironmentConnectionPresentation;
@@ -571,7 +569,6 @@ export interface ChatComposerProps {
 
   // Callbacks
   onSend: (e?: { preventDefault: () => void }) => void;
-  onRetryQueuedMessages: () => void;
   onInterrupt: () => void;
   onImplementPlanInNewThread: () => void;
   onRespondToApproval: (
@@ -624,8 +621,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isSendBusy,
     sendDisabledReason,
     isPreparingWorktree,
-    queuedMessageCount,
-    queuedMessagesPaused,
     environmentUnavailable,
     activePendingApproval,
     pendingApprovals,
@@ -656,7 +651,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     composerTerminalContextsRef,
     composerElementContextsRef,
     onSend,
-    onRetryQueuedMessages,
     onInterrupt,
     onImplementPlanInNewThread,
     onRespondToApproval,
@@ -3225,28 +3219,6 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               </div>
             </div>
           )}
-          {queuedMessageCount > 0 ? (
-            <div
-              className="flex items-center justify-between gap-3 px-3 pb-2.5 text-xs text-muted-foreground sm:px-4 sm:pb-3"
-              data-chat-queued-message-count={queuedMessageCount}
-            >
-              <span>
-                {queuedMessageCount} queued message{queuedMessageCount === 1 ? "" : "s"} will send
-                one at a time.
-              </span>
-              {queuedMessagesPaused ? (
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  className="h-7 shrink-0 rounded-full px-3 text-xs"
-                  onClick={onRetryQueuedMessages}
-                >
-                  Retry
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
         </div>
       </div>
     </form>

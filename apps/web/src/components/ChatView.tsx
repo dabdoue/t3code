@@ -197,6 +197,7 @@ import {
 import { buildPhysicalToLogicalProjectKeyMap } from "../sidebarProjectGrouping";
 import { buildDraftThreadRouteParams } from "../threadRoutes";
 import {
+  hydrateImagesFromPersisted,
   type ComposerImageAttachment,
   type DraftThreadEnvMode,
   useComposerDraftStore,
@@ -245,6 +246,7 @@ import { environmentShell } from "../state/shell";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
+import { QueuedWebThreadMessages } from "./chat/QueuedWebThreadMessages";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import { resolveTimelineIsAtEnd } from "./chat/MessagesTimeline.logic";
@@ -289,6 +291,7 @@ import {
   hasEnvironmentReconnectWarningGraceElapsed,
   scheduleEnvironmentReconnectWarning,
   hasServerAcknowledgedLocalDispatch,
+  insertEditedQueuedMessage,
   isBranchMismatchDismissedForSession,
   shouldShowBranchMismatchBanner,
   getStartedThreadModelChangeBlockReason,
@@ -1272,6 +1275,9 @@ function ChatViewContent(props: ChatViewProps) {
       EMPTY_WEB_THREAD_OUTBOX_QUEUE,
   );
   const pausedOutboxMessageIds = useWebThreadOutboxStore((state) => state.pausedMessageIds);
+  const activeThreadOutboxHeld = useWebThreadOutboxStore((state) =>
+    Boolean(state.heldThreadKeys[webThreadOutboxKey(environmentId, props.threadId)]),
+  );
   // New-thread defaults live in the primary environment's settings.json (the
   // settings UI never writes to remote environments), so read them from the
   // primary server rather than the thread's environment.
@@ -1318,6 +1324,10 @@ function ChatViewContent(props: ChatViewProps) {
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [expandedImage, setExpandedImage] = useState<ExpandedImagePreview | null>(null);
   const [optimisticUserMessages, setOptimisticUserMessages] = useState<ChatMessage[]>([]);
+  const [editingQueuedMessage, setEditingQueuedMessage] = useState<{
+    readonly previousMessageId: MessageId | null;
+    readonly nextMessageId: MessageId | null;
+  } | null>(null);
   const optimisticUserMessagesRef = useRef(optimisticUserMessages);
   optimisticUserMessagesRef.current = optimisticUserMessages;
   const [localDraftErrorsByDraftId, setLocalDraftErrorsByDraftId] = useState<
@@ -4804,14 +4814,17 @@ function ChatViewContent(props: ChatViewProps) {
       notifyDirectAnnotationAttached();
       return;
     }
-    const shouldQueueCurrentMessage = shouldQueueWebThreadMessage({
-      activeTurnMessageBehavior: settings.activeTurnMessageBehavior,
-      hasQueuedMessages: activeThreadOutboxQueue.length > 0,
-      isSendBusy,
-      isServerThread,
-      phase,
-      threadStarting: activeThread?.session?.status === "starting",
-    });
+    const shouldQueueCurrentMessage =
+      editingQueuedMessage !== null ||
+      shouldQueueWebThreadMessage({
+        activeTurnMessageBehavior: settings.activeTurnMessageBehavior,
+        hasQueuedMessages: activeThreadOutboxQueue.length > 0,
+        queueHeld: activeThreadOutboxHeld,
+        isSendBusy,
+        isServerThread,
+        phase,
+        threadStarting: activeThread?.session?.status === "starting",
+      });
     if (
       !activeThread ||
       (isSendBusy && !shouldQueueCurrentMessage) ||
@@ -4892,7 +4905,12 @@ function ChatViewContent(props: ChatViewProps) {
         composerPreviewAnnotations.length +
         composerReviewComments.length,
     });
-    if (!directAnnotation && showPlanFollowUpPrompt && activeProposedPlan) {
+    if (
+      editingQueuedMessage === null &&
+      !directAnnotation &&
+      showPlanFollowUpPrompt &&
+      activeProposedPlan
+    ) {
       const followUp = resolvePlanFollowUpSubmission({
         draftText: trimmed,
         planMarkdown: activeProposedPlan.planMarkdown,
@@ -4917,7 +4935,7 @@ function ChatViewContent(props: ChatViewProps) {
       composerReviewComments.length === 0
         ? parseStandaloneComposerSlashCommand(trimmed)
         : null;
-    if (standaloneSlashCommand) {
+    if (standaloneSlashCommand && editingQueuedMessage === null) {
       handleInteractionModeChange(standaloneSlashCommand);
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -5027,19 +5045,36 @@ function ChatViewContent(props: ChatViewProps) {
 
       const messageId = newMessageId();
       const createdAt = new Date().toISOString();
-      const { durable } = useWebThreadOutboxStore.getState().enqueue({
+      const outboxStore = useWebThreadOutboxStore.getState();
+      let { durable } = outboxStore.enqueue({
         environmentId,
         threadId: threadIdForSend,
         messageId,
         commandId: newCommandId(),
         text: outgoingMessageText,
+        composerText: messageTextForSend,
         attachments: attachmentsResult.value,
         modelSelection: ctxSelectedModelSelection,
         runtimeMode,
         interactionMode,
-        activeTurnMessageBehavior: settings.activeTurnMessageBehavior,
+        activeTurnMessageBehavior:
+          editingQueuedMessage === null ? settings.activeTurnMessageBehavior : "queue",
         createdAt,
       });
+      if (editingQueuedMessage !== null) {
+        const queuedMessageIds = (
+          outboxStore.queuesByThreadKey[webThreadOutboxKey(environmentId, threadIdForSend)] ?? []
+        )
+          .map((message) => message.messageId)
+          .filter((queuedMessageId) => queuedMessageId !== messageId);
+        const reorderResult = outboxStore.reorder(
+          environmentId,
+          threadIdForSend,
+          insertEditedQueuedMessage(queuedMessageIds, messageId, editingQueuedMessage),
+        );
+        durable = durable && reorderResult.durable;
+        setEditingQueuedMessage(null);
+      }
       setThreadError(threadIdForSend, null);
       if (expiredTerminalContextCount > 0) {
         const toastCopy = buildExpiredTerminalContextToastCopy(
@@ -5332,20 +5367,102 @@ function ChatViewContent(props: ChatViewProps) {
     }
   };
 
-  const nextQueuedMessage = activeThreadOutboxQueue[0] ?? null;
-  const queuedMessagePaused =
-    nextQueuedMessage !== null && Boolean(pausedOutboxMessageIds[nextQueuedMessage.messageId]);
+  const promoteQueuedMessageToSteer = useCallback(
+    (messageId: MessageId) => {
+      const result = useWebThreadOutboxStore
+        .getState()
+        .promoteToSteer(messageId, new Date().toISOString());
+      if (result.found) setThreadError(props.threadId, null);
+    },
+    [props.threadId, setThreadError],
+  );
 
-  const retryQueuedMessages = useCallback(() => {
-    if (!nextQueuedMessage) {
-      return;
-    }
-    useWebThreadOutboxStore.getState().retry(nextQueuedMessage.messageId);
-    setThreadError(nextQueuedMessage.threadId, null);
-  }, [nextQueuedMessage, setThreadError]);
+  const removeQueuedMessage = useCallback(
+    (messageId: MessageId) => {
+      const store = useWebThreadOutboxStore.getState();
+      const message =
+        store.queuesByThreadKey[webThreadOutboxKey(environmentId, props.threadId)]?.find(
+          (candidate) => candidate.messageId === messageId,
+        ) ?? null;
+      if (!message) return;
+      store.remove(message);
+      setThreadError(message.threadId, null);
+    },
+    [environmentId, props.threadId, setThreadError],
+  );
+
+  const retryQueuedMessage = useCallback(
+    (messageId: MessageId) => {
+      useWebThreadOutboxStore.getState().retry(messageId);
+      setThreadError(props.threadId, null);
+    },
+    [props.threadId, setThreadError],
+  );
+
+  const editQueuedMessage = useCallback(
+    (messageId: MessageId) => {
+      const store = useWebThreadOutboxStore.getState();
+      const messages =
+        store.queuesByThreadKey[webThreadOutboxKey(environmentId, props.threadId)] ?? [];
+      const messageIndex = messages.findIndex((message) => message.messageId === messageId);
+      const message = messages[messageIndex];
+      if (!message) return;
+
+      const composerText = message.composerText ?? message.text;
+      const images = hydrateImagesFromPersisted(
+        message.attachments.map((attachment, attachmentIndex) => ({
+          ...attachment,
+          id: `${message.messageId}:attachment:${attachmentIndex}`,
+        })),
+      );
+      store.remove(message);
+      setEditingQueuedMessage({
+        previousMessageId: messages[messageIndex - 1]?.messageId ?? null,
+        nextMessageId: messages[messageIndex + 1]?.messageId ?? null,
+      });
+      promptRef.current = composerText;
+      clearComposerDraftContent(composerDraftTarget);
+      restoreComposerDraftContent(composerDraftTarget, {
+        prompt: composerText,
+        images,
+        terminalContexts: [],
+        elementContexts: [],
+        previewAnnotations: [],
+        reviewComments: [],
+      });
+      setComposerDraftModelSelection(composerDraftTarget, message.modelSelection, {
+        replaceOptions: true,
+      });
+      setComposerDraftRuntimeMode(composerDraftTarget, message.runtimeMode);
+      setComposerDraftInteractionMode(composerDraftTarget, message.interactionMode);
+      setThreadError(props.threadId, null);
+      scheduleComposerFocus();
+    },
+    [
+      clearComposerDraftContent,
+      composerDraftTarget,
+      environmentId,
+      props.threadId,
+      restoreComposerDraftContent,
+      scheduleComposerFocus,
+      setComposerDraftInteractionMode,
+      setComposerDraftModelSelection,
+      setComposerDraftRuntimeMode,
+      setThreadError,
+    ],
+  );
+
+  const reorderQueuedMessages = useCallback(
+    (orderedMessageIds: ReadonlyArray<MessageId>) => {
+      useWebThreadOutboxStore.getState().reorder(environmentId, props.threadId, orderedMessageIds);
+    },
+    [environmentId, props.threadId],
+  );
 
   const onInterrupt = async () => {
     if (!activeThread) return;
+    const outboxStore = useWebThreadOutboxStore.getState();
+    const holdApplied = outboxStore.holdThread(environmentId, activeThread.id).changed;
     const result = await interruptThreadTurn({
       environmentId,
       input: buildThreadTurnInterruptInput(activeThread),
@@ -5356,6 +5473,9 @@ function ChatViewContent(props: ChatViewProps) {
         activeThread.id,
         error instanceof Error ? error.message : "Failed to interrupt the current turn.",
       );
+    }
+    if (result._tag === "Failure" && holdApplied) {
+      outboxStore.releaseThread(environmentId, activeThread.id);
     }
   };
 
@@ -6288,7 +6408,26 @@ function ChatViewContent(props: ChatViewProps) {
                       <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
                     </div>
                   ) : (
-                    <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
+                    <>
+                      {isServerThread ? (
+                        <QueuedWebThreadMessages
+                          messages={activeThreadOutboxQueue}
+                          pausedMessageIds={pausedOutboxMessageIds}
+                          canSteer={
+                            phase === "running" ||
+                            (activeThreadOutboxHeld &&
+                              phase !== "connecting" &&
+                              !activeEnvironmentUnavailable)
+                          }
+                          onSteer={promoteQueuedMessageToSteer}
+                          onRemove={removeQueuedMessage}
+                          onRetry={retryQueuedMessage}
+                          onEdit={editQueuedMessage}
+                          onReorder={reorderQueuedMessages}
+                        />
+                      ) : null}
+                      <ComposerBannerStack className="relative z-0" items={composerBannerItems} />
+                    </>
                   )}
                   {threadSyncPhase && !activeEnvironmentUnavailable ? (
                     <ThreadSyncStatusPill phase={threadSyncPhase} />
@@ -6334,8 +6473,6 @@ function ChatViewContent(props: ChatViewProps) {
                                   : null
                             }
                             isPreparingWorktree={isPreparingWorktree}
-                            queuedMessageCount={activeThreadOutboxQueue.length}
-                            queuedMessagesPaused={queuedMessagePaused}
                             environmentUnavailable={activeEnvironmentUnavailableState}
                             activePendingApproval={activePendingApproval}
                             pendingApprovals={pendingApprovals}
@@ -6367,7 +6504,6 @@ function ChatViewContent(props: ChatViewProps) {
                             composerTerminalContextsRef={composerTerminalContextsRef}
                             composerElementContextsRef={composerElementContextsRef}
                             onSend={onSend}
-                            onRetryQueuedMessages={retryQueuedMessages}
                             onInterrupt={onInterrupt}
                             onImplementPlanInNewThread={onImplementPlanInNewThread}
                             onRespondToApproval={onRespondToApproval}

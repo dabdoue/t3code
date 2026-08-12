@@ -1,8 +1,14 @@
 import { CommandId } from "@t3tools/contracts";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { resolveThreadMetadataUpdateForNextTurn } from "./ChatView.logic";
-import { shouldPauseWebThreadOutboxDelivery } from "./WebThreadOutboxDrain.logic";
+import {
+  advanceWebThreadOutboxDeliveryGate,
+  makeWebThreadOutboxDeliveryGate,
+  shouldPauseWebThreadOutboxDelivery,
+  webThreadOutboxDeliveryGateBlocksMessage,
+  type WebThreadOutboxDeliveryGate,
+} from "./WebThreadOutboxDrain.logic";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { useEnvironments } from "../state/environments";
 import { useThreadShells } from "../state/entities";
@@ -24,6 +30,7 @@ function settingsCommandId(commandId: CommandId, setting: string): CommandId {
 export function WebThreadOutboxDrain() {
   const queuesByThreadKey = useWebThreadOutboxStore((state) => state.queuesByThreadKey);
   const pausedMessageIds = useWebThreadOutboxStore((state) => state.pausedMessageIds);
+  const heldThreadKeys = useWebThreadOutboxStore((state) => state.heldThreadKeys);
   const threads = useThreadShells();
   const { environments } = useEnvironments();
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
@@ -37,9 +44,28 @@ export function WebThreadOutboxDrain() {
   });
   const startThreadTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const [drainTick, setDrainTick] = useState(0);
+  const deliveryGatesRef = useRef(new Map<string, WebThreadOutboxDeliveryGate>());
+
+  useEffect(() => {
+    let changed = false;
+    for (const thread of threads) {
+      const threadKey = `${thread.environmentId}:${thread.id}`;
+      const gate = deliveryGatesRef.current.get(threadKey);
+      if (!gate) continue;
+      const advanced = advanceWebThreadOutboxDeliveryGate(gate, thread.session?.status ?? null);
+      if (advanced === null) {
+        deliveryGatesRef.current.delete(threadKey);
+        changed = true;
+      } else if (advanced !== gate) {
+        deliveryGatesRef.current.set(threadKey, advanced);
+        changed = true;
+      }
+    }
+    if (changed) setDrainTick((current) => current + 1);
+  }, [threads]);
 
   const nextDelivery = useMemo(() => {
-    const threadByKey = new Map(
+    const threadByKey = new Map<string, (typeof threads)[number]>(
       threads.map((thread) => [`${thread.environmentId}:${thread.id}`, thread] as const),
     );
     const environmentById = new Map(
@@ -50,14 +76,24 @@ export function WebThreadOutboxDrain() {
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 
     for (const message of heads) {
-      const thread = threadByKey.get(`${message.environmentId}:${message.threadId}`);
+      const threadKey = `${message.environmentId}:${message.threadId}`;
+      const thread = threadByKey.get(threadKey);
       if (!thread) continue;
+      if (
+        webThreadOutboxDeliveryGateBlocksMessage(
+          deliveryGatesRef.current.get(threadKey) ?? null,
+          message.activeTurnMessageBehavior,
+        )
+      ) {
+        continue;
+      }
       const environment = environmentById.get(message.environmentId);
       if (
         shouldDrainWebThreadOutbox({
           sessionStatus: thread.session?.status ?? null,
           environmentConnected: environment?.connection.phase === "connected",
           paused: Boolean(pausedMessageIds[message.messageId]),
+          held: Boolean(heldThreadKeys[threadKey]),
           activeTurnMessageBehavior: message.activeTurnMessageBehavior,
         })
       ) {
@@ -65,13 +101,28 @@ export function WebThreadOutboxDrain() {
       }
     }
     return null;
-  }, [drainTick, environments, pausedMessageIds, queuesByThreadKey, threads]);
+  }, [drainTick, environments, heldThreadKeys, pausedMessageIds, queuesByThreadKey, threads]);
 
   useEffect(() => {
     if (!nextDelivery || !beginWebThreadOutboxDispatch(nextDelivery.message.messageId)) {
       return;
     }
     const { message, thread } = nextDelivery;
+    const threadKey = `${message.environmentId}:${message.threadId}`;
+    const existingGate = deliveryGatesRef.current.get(threadKey);
+    const createdGate = existingGate === undefined;
+    if (createdGate) {
+      deliveryGatesRef.current.set(
+        threadKey,
+        makeWebThreadOutboxDeliveryGate(message.messageId, thread.session?.status ?? null),
+      );
+    }
+
+    const releaseCreatedGate = () => {
+      if (!createdGate) return;
+      const gate = deliveryGatesRef.current.get(threadKey);
+      if (gate?.messageId === message.messageId) deliveryGatesRef.current.delete(threadKey);
+    };
 
     const deliver = async () => {
       const metadataUpdate = resolveThreadMetadataUpdateForNextTurn({
@@ -132,6 +183,7 @@ export function WebThreadOutboxDrain() {
           sessionStatus: freshThread.session?.status ?? null,
           environmentConnected: freshEnvironment?.connection.phase === "connected",
           paused: Boolean(useWebThreadOutboxStore.getState().pausedMessageIds[message.messageId]),
+          held: Boolean(useWebThreadOutboxStore.getState().heldThreadKeys[threadKey]),
           activeTurnMessageBehavior: message.activeTurnMessageBehavior,
         })
       ) {
@@ -160,8 +212,12 @@ export function WebThreadOutboxDrain() {
 
     void deliver()
       .then((result) => {
-        if (result._tag === "Deferred") return;
+        if (result._tag === "Deferred") {
+          releaseCreatedGate();
+          return;
+        }
         if (result._tag === "Failure") {
+          releaseCreatedGate();
           if (!shouldPauseWebThreadOutboxDelivery(result)) return;
           useWebThreadOutboxStore.getState().pause(message.messageId);
           toastManager.add(
@@ -176,6 +232,7 @@ export function WebThreadOutboxDrain() {
         useWebThreadOutboxStore.getState().remove(message);
       })
       .catch((error: unknown) => {
+        releaseCreatedGate();
         console.error("[THREAD-OUTBOX] Queued delivery failed unexpectedly.", error);
         useWebThreadOutboxStore.getState().pause(message.messageId);
       })

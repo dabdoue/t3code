@@ -18,6 +18,7 @@ import { create } from "zustand";
 
 export const WEB_THREAD_OUTBOX_STORAGE_KEY = "t3code:thread-outbox:v1";
 export const WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX = "t3code:thread-outbox:v2:";
+export const WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX = "t3code:thread-outbox:hold:v1:";
 const WEB_THREAD_OUTBOX_STORAGE_VERSION = 2;
 
 interface EnumerableStorage {
@@ -55,11 +56,14 @@ const QueuedWebThreadMessageSchema = Schema.Struct({
   messageId: MessageId,
   commandId: CommandId,
   text: Schema.String,
+  composerText: Schema.optional(Schema.String),
   attachments: Schema.Array(QueuedWebImageAttachment),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   activeTurnMessageBehavior: Schema.optional(ActiveTurnMessageBehavior),
+  steerRequestedAt: Schema.optional(Schema.String),
+  queueOrder: Schema.optional(Schema.Number),
   createdAt: Schema.String,
 });
 
@@ -69,11 +73,14 @@ export interface QueuedWebThreadMessage {
   readonly messageId: MessageId;
   readonly commandId: CommandId;
   readonly text: string;
+  readonly composerText?: string;
   readonly attachments: ReadonlyArray<UploadChatAttachment>;
   readonly modelSelection: ModelSelection;
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly activeTurnMessageBehavior: ActiveTurnMessageBehaviorType;
+  readonly steerRequestedAt?: string;
+  readonly queueOrder?: number;
   readonly createdAt: string;
 }
 
@@ -90,9 +97,13 @@ const decodePersistedEntry = Schema.decodeUnknownSync(PersistedWebThreadOutboxEn
 function normalizeMessage(
   message: typeof QueuedWebThreadMessageSchema.Type,
 ): QueuedWebThreadMessage {
+  const { composerText, queueOrder, steerRequestedAt, ...rest } = message;
   return {
-    ...message,
+    ...rest,
     activeTurnMessageBehavior: message.activeTurnMessageBehavior ?? "queue",
+    ...(composerText === undefined ? {} : { composerText }),
+    ...(steerRequestedAt === undefined ? {} : { steerRequestedAt }),
+    ...(queueOrder === undefined ? {} : { queueOrder }),
   };
 }
 
@@ -102,6 +113,10 @@ export function webThreadOutboxKey(environmentId: EnvironmentId, threadId: Threa
 
 function storageKey(messageId: MessageId): string {
   return `${WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX}${encodeURIComponent(String(messageId))}`;
+}
+
+function holdStorageKey(threadKey: string): string {
+  return `${WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX}${encodeURIComponent(threadKey)}`;
 }
 
 function groupMessages(
@@ -117,11 +132,27 @@ function groupMessages(
     (grouped[threadKey] ??= []).push(message);
   }
   for (const queue of Object.values(grouped)) {
-    queue.sort(
-      (left, right) =>
-        left.createdAt.localeCompare(right.createdAt) ||
-        String(left.messageId).localeCompare(String(right.messageId)),
-    );
+    queue.sort((left, right) => {
+      const leftSteerAt =
+        left.activeTurnMessageBehavior === "steer"
+          ? (left.steerRequestedAt ?? left.createdAt)
+          : null;
+      const rightSteerAt =
+        right.activeTurnMessageBehavior === "steer"
+          ? (right.steerRequestedAt ?? right.createdAt)
+          : null;
+      if (leftSteerAt !== null && rightSteerAt === null) return -1;
+      if (leftSteerAt === null && rightSteerAt !== null) return 1;
+      if (leftSteerAt === null && rightSteerAt === null) {
+        const leftQueueOrder = left.queueOrder ?? Number.POSITIVE_INFINITY;
+        const rightQueueOrder = right.queueOrder ?? Number.POSITIVE_INFINITY;
+        if (leftQueueOrder !== rightQueueOrder) return leftQueueOrder - rightQueueOrder;
+      }
+      return (
+        (leftSteerAt ?? left.createdAt).localeCompare(rightSteerAt ?? right.createdAt) ||
+        String(left.messageId).localeCompare(String(right.messageId))
+      );
+    });
   }
   return grouped;
 }
@@ -148,13 +179,20 @@ const { storage: baseOutboxStorage, durable: storageIsDurable } = resolveBaseSto
 interface PersistedSnapshot {
   readonly queuesByThreadKey: Record<string, ReadonlyArray<QueuedWebThreadMessage>>;
   readonly pausedMessageIds: Readonly<Record<MessageId, true>>;
+  readonly heldThreadKeys: Readonly<Record<string, true>>;
 }
 
 function readPersistedSnapshot(): PersistedSnapshot {
   const messages: QueuedWebThreadMessage[] = [];
   const pausedMessageIds: Record<MessageId, true> = {};
+  const heldThreadKeys: Record<string, true> = {};
   for (let index = 0; index < baseOutboxStorage.length; index += 1) {
     const key = baseOutboxStorage.key(index);
+    if (key?.startsWith(WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX)) {
+      const threadKey = decodeURIComponent(key.slice(WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX.length));
+      heldThreadKeys[threadKey] = true;
+      continue;
+    }
     if (!key?.startsWith(WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX)) {
       continue;
     }
@@ -186,7 +224,7 @@ function readPersistedSnapshot(): PersistedSnapshot {
       }
     }
   } catch {}
-  return { queuesByThreadKey: groupMessages(messages), pausedMessageIds };
+  return { queuesByThreadKey: groupMessages(messages), pausedMessageIds, heldThreadKeys };
 }
 
 function persistEntry(message: QueuedWebThreadMessage, paused: boolean): boolean {
@@ -215,8 +253,22 @@ function removePersistedEntry(messageId: MessageId): boolean {
   }
 }
 
+function persistThreadHold(threadKey: string, held: boolean): boolean {
+  try {
+    if (held) {
+      baseOutboxStorage.setItem(holdStorageKey(threadKey), "1");
+    } else {
+      baseOutboxStorage.removeItem(holdStorageKey(threadKey));
+    }
+    return true;
+  } catch (error) {
+    console.error("[THREAD-OUTBOX] Could not persist queue hold.", error);
+    return false;
+  }
+}
+
 function mergedSnapshot(
-  state: Pick<WebThreadOutboxState, "queuesByThreadKey" | "pausedMessageIds">,
+  state: Pick<WebThreadOutboxState, "queuesByThreadKey" | "pausedMessageIds" | "heldThreadKeys">,
 ) {
   const persisted = readPersistedSnapshot();
   const messages = [
@@ -226,21 +278,35 @@ function mergedSnapshot(
   return {
     queuesByThreadKey: groupMessages(messages),
     pausedMessageIds: { ...state.pausedMessageIds, ...persisted.pausedMessageIds },
+    heldThreadKeys: { ...state.heldThreadKeys, ...persisted.heldThreadKeys },
   };
 }
 
 interface WebThreadOutboxState {
   readonly queuesByThreadKey: Record<string, ReadonlyArray<QueuedWebThreadMessage>>;
   readonly pausedMessageIds: Readonly<Record<MessageId, true>>;
+  readonly heldThreadKeys: Readonly<Record<string, true>>;
   readonly enqueue: (message: QueuedWebThreadMessage) => { durable: boolean };
   readonly remove: (message: QueuedWebThreadMessage) => { durable: boolean };
+  readonly promoteToSteer: (
+    messageId: MessageId,
+    requestedAt: string,
+  ) => { found: boolean; durable: boolean };
+  readonly reorder: (
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+    orderedMessageIds: ReadonlyArray<MessageId>,
+  ) => { durable: boolean };
   readonly pause: (messageId: MessageId) => void;
   readonly retry: (messageId: MessageId) => void;
+  readonly holdThread: (environmentId: EnvironmentId, threadId: ThreadId) => { changed: boolean };
+  readonly releaseThread: (environmentId: EnvironmentId, threadId: ThreadId) => void;
 }
 
 export const useWebThreadOutboxStore = create<WebThreadOutboxState>()((set, get) => ({
   queuesByThreadKey: {},
   pausedMessageIds: {},
+  heldThreadKeys: {},
   enqueue: (message) => {
     const snapshot = mergedSnapshot(get());
     const queuesByThreadKey = groupMessages([
@@ -265,8 +331,64 @@ export const useWebThreadOutboxStore = create<WebThreadOutboxState>()((set, get)
     );
     const pausedMessageIds = { ...snapshot.pausedMessageIds };
     delete pausedMessageIds[message.messageId];
-    set({ queuesByThreadKey, pausedMessageIds });
+    const heldThreadKeys = { ...snapshot.heldThreadKeys };
+    const threadKey = webThreadOutboxKey(message.environmentId, message.threadId);
+    if ((queuesByThreadKey[threadKey]?.length ?? 0) === 0) {
+      delete heldThreadKeys[threadKey];
+      persistThreadHold(threadKey, false);
+    }
+    set({ queuesByThreadKey, pausedMessageIds, heldThreadKeys });
     return { durable: removed && storageIsDurable };
+  },
+  promoteToSteer: (messageId, requestedAt) => {
+    const snapshot = mergedSnapshot(get());
+    const message = flattenQueues(snapshot.queuesByThreadKey).find(
+      (candidate) => candidate.messageId === messageId,
+    );
+    if (!message) return { found: false, durable: false };
+    const promoted = {
+      ...message,
+      activeTurnMessageBehavior: "steer" as const,
+      steerRequestedAt: requestedAt,
+    };
+    const written = persistEntry(promoted, false);
+    const queuesByThreadKey = groupMessages([
+      ...flattenQueues(snapshot.queuesByThreadKey).filter(
+        (candidate) => candidate.messageId !== messageId,
+      ),
+      promoted,
+    ]);
+    const pausedMessageIds = { ...snapshot.pausedMessageIds };
+    delete pausedMessageIds[messageId];
+    set({ queuesByThreadKey, pausedMessageIds });
+    return { found: true, durable: written && storageIsDurable };
+  },
+  reorder: (environmentId, threadId, orderedMessageIds) => {
+    const snapshot = mergedSnapshot(get());
+    const threadKey = webThreadOutboxKey(environmentId, threadId);
+    const currentQueue = snapshot.queuesByThreadKey[threadKey] ?? [];
+    const messageById = new Map(currentQueue.map((message) => [message.messageId, message]));
+    const reordered = orderedMessageIds.flatMap((messageId) => {
+      const message = messageById.get(messageId);
+      if (!message) return [];
+      messageById.delete(messageId);
+      return [message];
+    });
+    reordered.push(...messageById.values());
+    const positioned = reordered.map((message, queueOrder) => ({ ...message, queueOrder }));
+    let written = true;
+    for (const message of positioned) {
+      written =
+        persistEntry(message, Boolean(snapshot.pausedMessageIds[message.messageId])) && written;
+    }
+    const queuesByThreadKey = groupMessages([
+      ...flattenQueues(snapshot.queuesByThreadKey).filter(
+        (message) => webThreadOutboxKey(message.environmentId, message.threadId) !== threadKey,
+      ),
+      ...positioned,
+    ]);
+    set({ queuesByThreadKey, pausedMessageIds: snapshot.pausedMessageIds });
+    return { durable: written && storageIsDurable };
   },
   pause: (messageId) => {
     const snapshot = mergedSnapshot(get());
@@ -290,6 +412,25 @@ export const useWebThreadOutboxStore = create<WebThreadOutboxState>()((set, get)
     const pausedMessageIds = { ...snapshot.pausedMessageIds };
     delete pausedMessageIds[messageId];
     set({ queuesByThreadKey: snapshot.queuesByThreadKey, pausedMessageIds });
+  },
+  holdThread: (environmentId, threadId) => {
+    const snapshot = mergedSnapshot(get());
+    const threadKey = webThreadOutboxKey(environmentId, threadId);
+    if (snapshot.heldThreadKeys[threadKey] || !snapshot.queuesByThreadKey[threadKey]?.length) {
+      return { changed: false };
+    }
+    persistThreadHold(threadKey, true);
+    set({ ...snapshot, heldThreadKeys: { ...snapshot.heldThreadKeys, [threadKey]: true } });
+    return { changed: true };
+  },
+  releaseThread: (environmentId, threadId) => {
+    const snapshot = mergedSnapshot(get());
+    const threadKey = webThreadOutboxKey(environmentId, threadId);
+    if (!snapshot.heldThreadKeys[threadKey]) return;
+    persistThreadHold(threadKey, false);
+    const heldThreadKeys = { ...snapshot.heldThreadKeys };
+    delete heldThreadKeys[threadKey];
+    set({ ...snapshot, heldThreadKeys });
   },
 }));
 
@@ -315,7 +456,8 @@ if (storageIsDurable && typeof window !== "undefined") {
     if (
       event.key !== null &&
       event.key !== WEB_THREAD_OUTBOX_STORAGE_KEY &&
-      !event.key.startsWith(WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX)
+      !event.key.startsWith(WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX) &&
+      !event.key.startsWith(WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX)
     ) {
       return;
     }
@@ -347,21 +489,24 @@ export function shouldDrainWebThreadOutbox(input: {
     | null;
   readonly environmentConnected: boolean;
   readonly paused: boolean;
+  readonly held: boolean;
   readonly activeTurnMessageBehavior: ActiveTurnMessageBehaviorType;
 }): boolean {
-  if (!input.environmentConnected || input.paused || input.sessionStatus === "starting") {
+  if (
+    !input.environmentConnected ||
+    input.paused ||
+    (input.held && input.activeTurnMessageBehavior !== "steer") ||
+    input.sessionStatus === "starting"
+  ) {
     return false;
   }
-  return (
-    input.sessionStatus === null ||
-    input.sessionStatus === "ready" ||
-    (input.sessionStatus === "running" && input.activeTurnMessageBehavior === "steer")
-  );
+  return input.sessionStatus !== "running" || input.activeTurnMessageBehavior === "steer";
 }
 
 export function shouldQueueWebThreadMessage(input: {
   readonly activeTurnMessageBehavior: ActiveTurnMessageBehaviorType;
   readonly hasQueuedMessages: boolean;
+  readonly queueHeld: boolean;
   readonly isSendBusy: boolean;
   readonly isServerThread: boolean;
   readonly phase: "disconnected" | "connecting" | "ready" | "running";
@@ -369,7 +514,7 @@ export function shouldQueueWebThreadMessage(input: {
 }): boolean {
   return (
     input.isServerThread &&
-    (input.hasQueuedMessages ||
+    ((input.hasQueuedMessages && !input.queueHeld) ||
       input.threadStarting ||
       (input.activeTurnMessageBehavior === "queue" &&
         (input.phase === "running" || input.isSendBusy)))
@@ -382,7 +527,8 @@ function clearStorageForTest(): void {
     const key = baseOutboxStorage.key(index);
     if (
       key === WEB_THREAD_OUTBOX_STORAGE_KEY ||
-      key?.startsWith(WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX)
+      key?.startsWith(WEB_THREAD_OUTBOX_ENTRY_STORAGE_PREFIX) ||
+      key?.startsWith(WEB_THREAD_OUTBOX_HOLD_STORAGE_PREFIX)
     ) {
       keys.push(key);
     }
