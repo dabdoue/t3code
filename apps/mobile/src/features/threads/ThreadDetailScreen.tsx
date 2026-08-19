@@ -70,6 +70,7 @@ export interface ThreadDetailScreenProps {
   readonly projectWorkspaceRoot: string | null;
   readonly threadCwd: string | null;
   readonly selectedThreadQueueCount: number;
+  readonly selectedThreadQueueHeld: boolean;
   readonly serverConfig: T3ServerConfig | null;
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
@@ -80,6 +81,7 @@ export interface ThreadDetailScreenProps {
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  readonly onSetQueuedAutoSend: (enabled: boolean) => void;
   readonly onSendMessage: () => Promise<MessageId | null>;
   readonly onReconnectEnvironment: () => void;
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
@@ -434,6 +436,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               selectedThread={props.selectedThread}
               serverConfig={props.serverConfig}
               queueCount={props.selectedThreadQueueCount}
+              queueHeld={props.selectedThreadQueueHeld}
               activeThreadBusy={props.activeThreadBusy}
               activeTurnMessageBehavior={props.activeTurnMessageBehavior}
               environmentId={props.environmentId}
@@ -444,6 +447,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
               onNativePasteImages={props.onNativePasteImages}
               onRemoveDraftImage={props.onRemoveDraftImage}
               onStopThread={props.onStopThread}
+              onSetQueuedAutoSend={props.onSetQueuedAutoSend}
               onSendMessage={handleSendMessage}
               onReconnectEnvironment={props.onReconnectEnvironment}
               onUpdateModelSelection={props.onUpdateThreadModelSelection}

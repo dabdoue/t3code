@@ -1192,11 +1192,15 @@ function buildPromptText(
 
 function buildUserMessage(input: {
   readonly sdkContent: Array<Record<string, unknown>>;
+  readonly uuid: string;
+  readonly priority?: "now" | "next" | "later";
 }): SDKUserMessage {
   return {
     type: "user",
     session_id: "",
     parent_tool_use_id: null,
+    uuid: input.uuid,
+    ...(input.priority === undefined ? {} : { priority: input.priority }),
     message: {
       role: "user",
       content: input.sdkContent as unknown as SDKUserMessage["message"]["content"],
@@ -1224,6 +1228,8 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     readonly fileSystem: FileSystem.FileSystem;
     readonly attachmentsDir: string;
     readonly boundInstanceId: ProviderInstanceId;
+    readonly uuid: string;
+    readonly priority?: "now" | "next" | "later";
   },
 ) {
   const text = buildPromptText(input, dependencies.boundInstanceId);
@@ -1278,7 +1284,11 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
-  return buildUserMessage({ sdkContent });
+  return buildUserMessage({
+    sdkContent,
+    uuid: dependencies.uuid,
+    ...(dependencies.priority === undefined ? {} : { priority: dependencies.priority }),
+  });
 });
 
 function turnStatusFromResult(result: SDKResultMessage): ProviderRuntimeTurnStatus {
@@ -4390,10 +4400,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       });
     }
 
+    // Unsigned SDK stdin frames default toward `now`, which aborts the parent
+    // turn and kills in-flight Agent tool calls. A cooperative `next` prompt
+    // waits for the current tool batch, so live subagents keep running.
     const message = yield* buildUserMessageEffect(input, {
       fileSystem,
       attachmentsDir: serverConfig.attachmentsDir,
       boundInstanceId,
+      uuid: yield* randomUUIDv4,
+      ...(steeringTurnState !== null && context.liveTaskIds.size > 0
+        ? { priority: "next" as const }
+        : {}),
     });
 
     yield* Queue.offer(context.promptQueue, {

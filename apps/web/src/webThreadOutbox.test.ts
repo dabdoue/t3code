@@ -86,6 +86,33 @@ describe("web thread outbox", () => {
         webThreadOutboxKey(environmentId, threadId)
       ],
     ).toEqual([queued]);
+    expect(
+      useWebThreadOutboxStore.getState().heldThreadKeys[
+        webThreadOutboxKey(environmentId, threadId)
+      ],
+    ).toBe(true);
+  });
+
+  it("holds leftover queued threads when hydrating local storage", () => {
+    const queued = message(8);
+    writeWebThreadOutboxStorageForTest(persistedOutbox([queued]));
+
+    expect(
+      shouldDrainWebThreadOutbox({
+        sessionStatus: "interrupted",
+        environmentConnected: true,
+        paused: false,
+        held: true,
+        activeTurnMessageBehavior: "queue",
+      }),
+    ).toBe(false);
+
+    useWebThreadOutboxStore.getState().releaseThread(environmentId, threadId);
+    expect(
+      useWebThreadOutboxStore.getState().heldThreadKeys[
+        webThreadOutboxKey(environmentId, threadId)
+      ],
+    ).toBeUndefined();
   });
 
   it("deduplicates stable message ids and removes only the delivered head", () => {

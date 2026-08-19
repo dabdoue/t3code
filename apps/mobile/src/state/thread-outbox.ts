@@ -1,4 +1,4 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
 import { appAtomRegistry } from "./atom-registry";
 import { createThreadOutboxManager } from "./thread-outbox-manager";
@@ -36,4 +36,12 @@ export function removeThreadOutboxMessage(message: QueuedThreadMessage): Promise
 
 export function clearThreadOutboxEnvironment(environmentId: EnvironmentId): Promise<void> {
   return threadOutboxManager.clearEnvironment(environmentId);
+}
+
+export function holdThreadOutbox(environmentId: EnvironmentId, threadId: ThreadId): boolean {
+  return threadOutboxManager.holdThread(environmentId, threadId).changed;
+}
+
+export function releaseThreadOutbox(environmentId: EnvironmentId, threadId: ThreadId): void {
+  threadOutboxManager.releaseThread(environmentId, threadId);
 }

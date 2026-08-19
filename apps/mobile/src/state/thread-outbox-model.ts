@@ -181,6 +181,7 @@ export function resolveThreadOutboxDeliveryAction(input: {
   readonly threadBusy: boolean;
   readonly threadSteerable: boolean;
   readonly activeTurnMessageBehavior?: ActiveTurnMessageBehaviorType;
+  readonly held?: boolean;
 }): ThreadOutboxDeliveryAction {
   if (input.isCreation) {
     // A pending task creates its thread on delivery. If the thread already
@@ -195,6 +196,12 @@ export function resolveThreadOutboxDeliveryAction(input: {
   }
   if (!input.threadExists) {
     return input.shellStatus === "live" ? "remove" : "wait";
+  }
+  if (
+    input.held === true &&
+    !(input.activeTurnMessageBehavior === "steer" && input.threadSteerable)
+  ) {
+    return "wait";
   }
   const canSendWhileBusy =
     !input.threadBusy || (input.activeTurnMessageBehavior === "steer" && input.threadSteerable);

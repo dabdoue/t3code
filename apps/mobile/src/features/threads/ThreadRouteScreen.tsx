@@ -63,6 +63,7 @@ import { useSelectedThreadRequests } from "../../state/use-selected-thread-reque
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
+import { holdThreadOutbox, releaseThreadOutbox } from "../../state/thread-outbox";
 import { projectThreadContentPresentation } from "./threadContentPresentation";
 import {
   useAdaptiveWorkspaceLayout,
@@ -486,7 +487,10 @@ function ThreadRouteContent(
     ) {
       return;
     }
-    return interruptThreadTurn({
+    const holdApplied =
+      composer.selectedThreadQueueCount > 0 &&
+      holdThreadOutbox(selectedThread.environmentId, selectedThread.id);
+    void interruptThreadTurn({
       environmentId: selectedThread.environmentId,
       input: {
         threadId: selectedThread.id,
@@ -494,8 +498,12 @@ function ThreadRouteContent(
           ? { turnId: selectedThread.session.activeTurnId }
           : {}),
       },
+    }).then((result) => {
+      if (result._tag === "Failure" && holdApplied) {
+        releaseThreadOutbox(selectedThread.environmentId, selectedThread.id);
+      }
     });
-  }, [interruptThreadTurn, selectedThread]);
+  }, [composer.selectedThreadQueueCount, interruptThreadTurn, selectedThread]);
 
   const handleOpenTerminal = useCallback(
     (nextTerminalId?: string | null) => {
@@ -791,6 +799,7 @@ function ThreadRouteContent(
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
           selectedThreadQueueCount={composer.selectedThreadQueueCount}
+          selectedThreadQueueHeld={composer.selectedThreadQueueHeld}
           layoutVariant={layout.variant}
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}
@@ -800,6 +809,7 @@ function ThreadRouteContent(
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}
           onStopThread={handleStopThread}
+          onSetQueuedAutoSend={composer.onSetQueuedAutoSend}
           onSendMessage={composer.onSendMessage}
           onReconnectEnvironment={handleReconnectEnvironment}
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}

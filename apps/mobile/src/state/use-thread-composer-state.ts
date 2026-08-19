@@ -41,8 +41,8 @@ import {
 import { setPendingConnectionError } from "../state/use-remote-environment-registry";
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
-import { enqueueThreadOutboxMessage } from "./thread-outbox";
-import { useThreadOutboxMessages } from "./use-thread-outbox";
+import { enqueueThreadOutboxMessage, holdThreadOutbox, releaseThreadOutbox } from "./thread-outbox";
+import { useThreadOutboxHeldThreadKeys, useThreadOutboxMessages } from "./use-thread-outbox";
 import { awaitActiveTurnMessageBehavior, mobilePreferencesAtom } from "./preferences";
 
 export function appendReviewCommentToDraft(input: {
@@ -81,6 +81,7 @@ export function useThreadComposerState() {
   const selectedThreadDetail = useSelectedThreadDetail();
   const composerDrafts = useAtomValue(composerDraftsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const heldThreadKeys = useThreadOutboxHeldThreadKeys();
   const preferencesResult = useAtomValue(mobilePreferencesAtom);
   const activeTurnMessageBehavior = AsyncResult.isSuccess(preferencesResult)
     ? (preferencesResult.value.activeTurnMessageBehavior ?? DEFAULT_ACTIVE_TURN_MESSAGE_BEHAVIOR)
@@ -106,6 +107,9 @@ export function useThreadComposerState() {
   const draftMessage = selectedDraft?.text ?? "";
   const draftAttachments = selectedDraft?.attachments ?? [];
   const selectedThreadQueueCount = selectedThreadQueuedMessages.length;
+  const selectedThreadQueueHeld = selectedThreadKey
+    ? Boolean(heldThreadKeys[selectedThreadKey])
+    : false;
   const selectedThread = selectedThreadDetail ?? selectedThreadShell;
   const modelSelection = selectedDraft?.modelSelection ?? selectedThread?.modelSelection ?? null;
   const runtimeMode = selectedDraft?.runtimeMode ?? selectedThread?.runtimeMode ?? null;
@@ -321,9 +325,24 @@ export function useThreadComposerState() {
     [selectedThreadKey],
   );
 
+  const onSetQueuedAutoSend = useCallback(
+    (enabled: boolean) => {
+      if (!selectedThreadShell) {
+        return;
+      }
+      if (enabled) {
+        releaseThreadOutbox(selectedThreadShell.environmentId, selectedThreadShell.id);
+        return;
+      }
+      holdThreadOutbox(selectedThreadShell.environmentId, selectedThreadShell.id);
+    },
+    [selectedThreadShell],
+  );
+
   return {
     selectedThreadFeed,
     selectedThreadQueueCount,
+    selectedThreadQueueHeld,
     activeWorkStartedAt,
     draftMessage,
     draftAttachments,
@@ -338,6 +357,7 @@ export function useThreadComposerState() {
     onNativePasteImages,
     onRemoveDraftImage,
     onSendMessage,
+    onSetQueuedAutoSend,
     onUpdateModelSelection,
     onUpdateRuntimeMode,
     onUpdateInteractionMode,

@@ -23,6 +23,7 @@ import {
   Platform,
   Pressable,
   StyleSheet,
+  Switch,
   useColorScheme,
   View,
   type ViewStyle,
@@ -99,6 +100,7 @@ export interface ThreadComposerProps {
   readonly selectedThread: OrchestrationThreadShell;
   readonly serverConfig: T3ServerConfig | null;
   readonly queueCount: number;
+  readonly queueHeld: boolean;
   readonly activeThreadBusy: boolean;
   readonly activeTurnMessageBehavior: ActiveTurnMessageBehavior;
   readonly environmentId: EnvironmentId;
@@ -109,6 +111,7 @@ export interface ThreadComposerProps {
   readonly onNativePasteImages: (uris: ReadonlyArray<string>) => Promise<void>;
   readonly onRemoveDraftImage: (imageId: string) => void;
   readonly onStopThread: () => void;
+  readonly onSetQueuedAutoSend: (enabled: boolean) => void;
   readonly onSendMessage: () => Promise<MessageId | null>;
   readonly onUpdateModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateRuntimeMode: (runtimeMode: RuntimeMode) => void;
@@ -832,10 +835,20 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
         {/* Queue count */}
         {props.queueCount > 0 ? (
           <Animated.View entering={FadeIn.duration(180)} exiting={FadeOut.duration(120)}>
-            <Text className="pt-2 text-xs text-foreground-muted">
-              {props.queueCount} queued message{props.queueCount === 1 ? "" : "s"} will send
-              automatically.
-            </Text>
+            <View className="flex-row items-center justify-between pt-2">
+              <Text className="text-xs text-foreground-muted">
+                {props.queueCount} queued message{props.queueCount === 1 ? "" : "s"}
+              </Text>
+              <View className="flex-row items-center gap-2">
+                <Text className="text-xs text-foreground-muted">Auto-send next</Text>
+                <Switch
+                  accessibilityLabel="Auto-send next queued message"
+                  onValueChange={props.onSetQueuedAutoSend}
+                  value={!props.queueHeld}
+                  style={{ transform: [{ scaleX: 0.8 }, { scaleY: 0.8 }] }}
+                />
+              </View>
+            </View>
           </Animated.View>
         ) : null}
       </Animated.View>

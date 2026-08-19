@@ -251,6 +251,29 @@ async function readFirstPromptText(
   return content.text;
 }
 
+async function readPromptMessages(
+  input:
+    | {
+        readonly prompt: AsyncIterable<SDKUserMessage>;
+      }
+    | undefined,
+  count: number,
+): Promise<SDKUserMessage[]> {
+  const iterator = input?.prompt[Symbol.asyncIterator]();
+  if (!iterator) {
+    return [];
+  }
+  const messages: SDKUserMessage[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const next = await iterator.next();
+    if (next.done) {
+      break;
+    }
+    messages.push(next.value);
+  }
+  return messages;
+}
+
 async function readFirstPromptMessage(
   input:
     | {
@@ -258,15 +281,7 @@ async function readFirstPromptMessage(
       }
     | undefined,
 ): Promise<SDKUserMessage | undefined> {
-  const iterator = input?.prompt[Symbol.asyncIterator]();
-  if (!iterator) {
-    return undefined;
-  }
-  const next = await iterator.next();
-  if (next.done) {
-    return undefined;
-  }
-  return next.value;
+  return (await readPromptMessages(input, 1))[0];
 }
 
 const THREAD_ID = ThreadId.make("thread-claude-1");
@@ -1078,6 +1093,13 @@ describe("ClaudeAdapterLive", () => {
       });
       assert.equal(String(steeredTurn.turnId), String(turn.turnId));
 
+      const promptMessages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.equal(promptMessages.length, 2);
+      assert.equal(promptMessages[1]?.priority, undefined);
+      assert.isString(promptMessages[1]?.uuid);
+
       harness.query.emit({
         type: "assistant",
         session_id: "sdk-session-steer",
@@ -1108,6 +1130,62 @@ describe("ClaudeAdapterLive", () => {
       assert.equal(String(turnStartedEvents[0]?.turnId), String(turn.turnId));
       assert.equal(turnCompletedEvents.length, 1);
       assert.equal(String(turnCompletedEvents[0]?.turnId), String(turn.turnId));
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("steers with next priority while live Claude tasks are running", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+
+      const taskStartedFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+
+      const session = yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "spawn agents",
+        attachments: [],
+      });
+
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "task-live",
+        description: "Agent A",
+        task_type: "local_agent",
+        uuid: "task-live-uuid",
+        session_id: "sdk-session",
+      } as unknown as SDKMessage);
+
+      yield* Fiber.join(taskStartedFiber);
+
+      yield* adapter.sendTurn({
+        threadId: session.threadId,
+        input: "keep those agents going",
+        attachments: [],
+      });
+
+      const promptMessages = yield* Effect.promise(() =>
+        readPromptMessages(harness.getLastCreateQueryInput(), 2),
+      );
+      assert.equal(promptMessages.length, 2);
+      assert.equal(promptMessages[0]?.priority, undefined);
+      assert.equal(promptMessages[1]?.priority, "next");
+      assert.isString(promptMessages[1]?.uuid);
+      assert.equal(harness.query.stopTaskCalls.length, 0);
+      assert.equal(harness.query.interruptCalls.length, 0);
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),

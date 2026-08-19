@@ -25,16 +25,19 @@ import {
   RotateCcwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { memo } from "react";
+import { memo, useId } from "react";
 
 import type { QueuedWebThreadMessage } from "../../webThreadOutbox";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { Switch } from "../ui/switch";
 
 export const QueuedWebThreadMessages = memo(function QueuedWebThreadMessages({
   messages,
   pausedMessageIds,
   canSteer,
+  autoSendNext,
+  onAutoSendNextChange,
   onSteer,
   onRemove,
   onRetry,
@@ -44,6 +47,8 @@ export const QueuedWebThreadMessages = memo(function QueuedWebThreadMessages({
   readonly messages: ReadonlyArray<QueuedWebThreadMessage>;
   readonly pausedMessageIds: Readonly<Record<MessageId, true>>;
   readonly canSteer: boolean;
+  readonly autoSendNext: boolean;
+  readonly onAutoSendNextChange: (enabled: boolean) => void;
   readonly onSteer: (messageId: MessageId) => void;
   readonly onRemove: (messageId: MessageId) => void;
   readonly onRetry: (messageId: MessageId) => void;
@@ -54,6 +59,7 @@ export const QueuedWebThreadMessages = memo(function QueuedWebThreadMessages({
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
+  const autoSendSwitchId = useId();
 
   if (messages.length === 0) return null;
 
@@ -68,6 +74,22 @@ export const QueuedWebThreadMessages = memo(function QueuedWebThreadMessages({
 
   return (
     <div className="mx-auto mb-2 max-h-[30dvh] max-w-3xl overflow-y-auto px-1">
+      <div className="mb-1.5 flex items-center justify-end px-1">
+        <label
+          htmlFor={autoSendSwitchId}
+          className="flex cursor-pointer items-center gap-2 text-xs font-medium text-muted-foreground"
+          title="When on, the next queued message sends as soon as this thread finishes. Stopping the thread or restarting the app leaves this off."
+        >
+          Auto-send next
+          <Switch
+            id={autoSendSwitchId}
+            checked={autoSendNext}
+            className="[--thumb-size:--spacing(3.5)]"
+            aria-label="Auto-send next queued message"
+            onCheckedChange={(checked) => onAutoSendNextChange(checked === true)}
+          />
+        </label>
+      </div>
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}

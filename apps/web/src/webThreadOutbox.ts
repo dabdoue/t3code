@@ -232,6 +232,18 @@ function readPersistedSnapshot(): PersistedSnapshot {
   return { queuesByThreadKey: groupMessages(messages), pausedMessageIds, heldThreadKeys };
 }
 
+function holdQueuedThreadsOnHydrate(
+  snapshot: Pick<PersistedSnapshot, "queuesByThreadKey" | "heldThreadKeys">,
+): Record<string, true> {
+  const heldThreadKeys = { ...snapshot.heldThreadKeys };
+  for (const [threadKey, queue] of Object.entries(snapshot.queuesByThreadKey)) {
+    if (queue.length > 0) {
+      heldThreadKeys[threadKey] = true;
+    }
+  }
+  return heldThreadKeys;
+}
+
 function persistEntry(message: QueuedWebThreadMessage, paused: boolean): boolean {
   try {
     baseOutboxStorage.setItem(
@@ -516,7 +528,10 @@ export const EMPTY_WEB_THREAD_OUTBOX_QUEUE: ReadonlyArray<QueuedWebThreadMessage
 
 {
   const initial = readPersistedSnapshot();
-  useWebThreadOutboxStore.setState(initial);
+  useWebThreadOutboxStore.setState({
+    ...initial,
+    heldThreadKeys: holdQueuedThreadsOnHydrate(initial),
+  });
   try {
     const legacyMessages = flattenQueues(initial.queuesByThreadKey).filter(
       (message) => baseOutboxStorage.getItem(storageKey(message.messageId)) === null,
@@ -617,8 +632,10 @@ function clearStorageForTest(): void {
 export function writeWebThreadOutboxStorageForTest(raw: string): void {
   clearStorageForTest();
   if (raw) baseOutboxStorage.setItem(WEB_THREAD_OUTBOX_STORAGE_KEY, raw);
+  const persisted = readPersistedSnapshot();
   useWebThreadOutboxStore.setState({
-    ...readPersistedSnapshot(),
+    ...persisted,
+    heldThreadKeys: holdQueuedThreadsOnHydrate(persisted),
     serverManagedEnvironmentIds: {},
   });
   dispatchingMessageIds.clear();

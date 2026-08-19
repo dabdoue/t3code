@@ -191,15 +191,14 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
       thread.session.status !== "stopped" &&
       !activeThreadIds.has(thread.id),
   );
-  const queuedThreadIds = new Set(queueSnapshot.messages.map((message) => message.threadId));
-  const staleQueuedThreadIds = staleThreads
-    .map((thread) => thread.id)
-    .filter((threadId) => queuedThreadIds.has(threadId));
+  const queuedThreadIds = [...new Set(queueSnapshot.messages.map((message) => message.threadId))];
 
-  if (staleQueuedThreadIds.length > 0) {
+  if (queuedThreadIds.length > 0) {
     // A process death is the same interruption boundary as pressing Stop:
-    // preserve queued work, but require an explicit steer before it can run.
-    yield* threadQueue.holdThreads(staleQueuedThreadIds, true);
+    // leftover queue items stay, but they must not auto-send until the user
+    // turns auto-send back on (or steers). Hold every queued thread, not only
+    // ones whose parent session looked stale-running.
+    yield* threadQueue.holdThreads(queuedThreadIds, true);
   }
 
   yield* Effect.forEach(
@@ -237,10 +236,10 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
     { concurrency: 1 },
   );
 
-  if (staleThreads.length > 0) {
+  if (staleThreads.length > 0 || queuedThreadIds.length > 0) {
     yield* Effect.logInfo("reconciled stale provider sessions during startup", {
       sessionCount: staleThreads.length,
-      heldQueueCount: staleQueuedThreadIds.length,
+      heldQueueCount: queuedThreadIds.length,
     });
   }
 });

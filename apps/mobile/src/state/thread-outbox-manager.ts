@@ -2,6 +2,7 @@ import { EnvironmentId, MessageId, ThreadId } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 import { Atom, type AtomRegistry } from "effect/unstable/reactivity";
 
+import { scopedThreadKey } from "../lib/scopedEntities";
 import {
   flattenQueuedThreadMessages,
   groupQueuedThreadMessages,
@@ -41,6 +42,10 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
   const queuedMessagesByThreadKeyAtom = Atom.make<
     Record<string, ReadonlyArray<QueuedThreadMessage>>
   >({}).pipe(Atom.keepAlive, Atom.withLabel("mobile:thread-outbox:queued-messages"));
+  const heldThreadKeysAtom = Atom.make<Readonly<Record<string, true>>>({}).pipe(
+    Atom.keepAlive,
+    Atom.withLabel("mobile:thread-outbox:held-thread-keys"),
+  );
   const warn =
     options.warn ??
     ((message: string, error: unknown) => {
@@ -65,6 +70,66 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
     options.registry.set(queuedMessagesByThreadKeyAtom, groupQueuedThreadMessages(messages));
   };
 
+  const currentHeldThreadKeys = (): Record<string, true> => ({
+    ...options.registry.get(heldThreadKeysAtom),
+  });
+
+  const pruneHolds = (messages: ReadonlyArray<QueuedThreadMessage>): void => {
+    const liveKeys = new Set(
+      messages.map((message) => scopedThreadKey(message.environmentId, message.threadId)),
+    );
+    const current = currentHeldThreadKeys();
+    const next = Object.fromEntries(
+      Object.entries(current).filter(([threadKey]) => liveKeys.has(threadKey)),
+    );
+    if (Object.keys(next).length !== Object.keys(current).length) {
+      options.registry.set(heldThreadKeysAtom, next);
+    }
+  };
+
+  const holdLoadedFollowUpThreads = (messages: ReadonlyArray<QueuedThreadMessage>): void => {
+    const heldThreadKeys = currentHeldThreadKeys();
+    for (const message of messages) {
+      if (message.creation !== undefined) {
+        continue;
+      }
+      heldThreadKeys[scopedThreadKey(message.environmentId, message.threadId)] = true;
+    }
+    options.registry.set(heldThreadKeysAtom, heldThreadKeys);
+  };
+
+  const holdThread = (
+    environmentId: EnvironmentId,
+    threadId: ThreadId,
+  ): { readonly changed: boolean } => {
+    const threadKey = scopedThreadKey(environmentId, threadId);
+    const hasFollowUp = currentMessages().some(
+      (message) =>
+        message.environmentId === environmentId &&
+        message.threadId === threadId &&
+        message.creation === undefined,
+    );
+    if (!hasFollowUp) {
+      return { changed: false };
+    }
+    const heldThreadKeys = currentHeldThreadKeys();
+    if (heldThreadKeys[threadKey]) {
+      return { changed: false };
+    }
+    options.registry.set(heldThreadKeysAtom, { ...heldThreadKeys, [threadKey]: true });
+    return { changed: true };
+  };
+
+  const releaseThread = (environmentId: EnvironmentId, threadId: ThreadId): void => {
+    const threadKey = scopedThreadKey(environmentId, threadId);
+    const heldThreadKeys = currentHeldThreadKeys();
+    if (!heldThreadKeys[threadKey]) {
+      return;
+    }
+    delete heldThreadKeys[threadKey];
+    options.registry.set(heldThreadKeysAtom, heldThreadKeys);
+  };
+
   const load = (): Promise<void> => {
     if (loadPromise !== null) {
       return loadPromise;
@@ -72,6 +137,7 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
     loadPromise = serialize(async () => {
       const persistedMessages = await options.storage.load();
       setMessages([...persistedMessages, ...currentMessages()]);
+      holdLoadedFollowUpThreads(persistedMessages);
     }).catch((cause) => {
       loadPromise = null;
       warn(
@@ -168,6 +234,7 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
       setMessages(
         currentMessages().filter((candidate) => candidate.messageId !== message.messageId),
       );
+      pruneHolds(currentMessages());
     });
 
   const clearEnvironment = (environmentId: EnvironmentId): Promise<void> =>
@@ -213,10 +280,12 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
       );
 
       setMessages(allMessages.filter((message) => !removedMessageIds.has(message.messageId)));
+      pruneHolds(currentMessages());
     });
 
   return {
     queuedMessagesByThreadKeyAtom,
+    heldThreadKeysAtom,
     serialize,
     load,
     enqueue,
@@ -224,5 +293,7 @@ export function createThreadOutboxManager(options: ThreadOutboxManagerOptions) {
     update,
     remove,
     clearEnvironment,
+    holdThread,
+    releaseThread,
   };
 }

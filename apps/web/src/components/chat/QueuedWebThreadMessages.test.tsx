@@ -35,6 +35,8 @@ describe("QueuedWebThreadMessages", () => {
         messages={[queuedMessage]}
         pausedMessageIds={{}}
         canSteer
+        autoSendNext={false}
+        onAutoSendNextChange={vi.fn()}
         onSteer={vi.fn()}
         onRemove={vi.fn()}
         onRetry={vi.fn()}
@@ -49,7 +51,29 @@ describe("QueuedWebThreadMessages", () => {
     expect(markup).toContain('aria-label="Remove queued message"');
     expect(markup).toContain('aria-label="Reorder queued message"');
     expect(markup).toContain('aria-label="Queued message actions"');
+    expect(markup).toContain("Auto-send next");
+    expect(markup).toContain('aria-label="Auto-send next queued message"');
+    expect(markup).toContain('aria-checked="false"');
     expect(markup).not.toContain("Retry");
+  });
+
+  it("checks auto-send when the queue is not held", () => {
+    const markup = renderToStaticMarkup(
+      <QueuedWebThreadMessages
+        messages={[queuedMessage]}
+        pausedMessageIds={{}}
+        canSteer
+        autoSendNext
+        onAutoSendNextChange={vi.fn()}
+        onSteer={vi.fn()}
+        onRemove={vi.fn()}
+        onRetry={vi.fn()}
+        onEdit={vi.fn()}
+        onReorder={vi.fn()}
+      />,
+    );
+
+    expect(markup).toContain('aria-checked="true"');
   });
 
   it("shows Retry for a paused delivery and disables Steer without an active turn", () => {
@@ -58,6 +82,8 @@ describe("QueuedWebThreadMessages", () => {
         messages={[queuedMessage]}
         pausedMessageIds={{ [queuedMessage.messageId]: true }}
         canSteer={false}
+        autoSendNext
+        onAutoSendNextChange={vi.fn()}
         onSteer={vi.fn()}
         onRemove={vi.fn()}
         onRetry={vi.fn()}

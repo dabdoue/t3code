@@ -210,6 +210,68 @@ describe("thread outbox", () => {
     registry.dispose();
   });
 
+  it("holds follow-up queues restored from disk until auto-send is turned on", async () => {
+    const registry = AtomRegistry.make();
+    const message = queuedMessage({
+      messageId: "message-1",
+      createdAt: "2026-06-08T10:00:01.000Z",
+    });
+    const manager = createThreadOutboxManager({
+      registry,
+      storage: {
+        load: async () => [message],
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+    });
+
+    await manager.load();
+    expect(registry.get(manager.heldThreadKeysAtom)).toEqual({
+      "environment-1:thread-1": true,
+    });
+    expect(manager.holdThread(message.environmentId, message.threadId)).toEqual({ changed: false });
+
+    manager.releaseThread(message.environmentId, message.threadId);
+    expect(registry.get(manager.heldThreadKeysAtom)).toEqual({});
+    expect(manager.holdThread(message.environmentId, message.threadId)).toEqual({ changed: true });
+    expect(registry.get(manager.heldThreadKeysAtom)).toEqual({
+      "environment-1:thread-1": true,
+    });
+
+    await manager.remove(message);
+    expect(registry.get(manager.heldThreadKeysAtom)).toEqual({});
+    registry.dispose();
+  });
+
+  it("does not hold pending thread creations restored from disk", async () => {
+    const registry = AtomRegistry.make();
+    const message: QueuedThreadMessage = {
+      ...queuedMessage({
+        messageId: "message-create",
+        createdAt: "2026-06-08T10:00:01.000Z",
+      }),
+      creation: {
+        projectId: ProjectId.make("project-1"),
+        workspaceMode: "local",
+        branch: null,
+        worktreePath: null,
+      },
+    };
+    const manager = createThreadOutboxManager({
+      registry,
+      storage: {
+        load: async () => [message],
+        write: async () => undefined,
+        remove: async () => undefined,
+      },
+    });
+
+    await manager.load();
+    expect(registry.get(manager.heldThreadKeysAtom)).toEqual({});
+    expect(manager.holdThread(message.environmentId, message.threadId)).toEqual({ changed: false });
+    registry.dispose();
+  });
+
   it("reports structured load failures and permits a retry", async () => {
     const registry = AtomRegistry.make();
     const loadCause = new Error("storage unavailable");
@@ -512,6 +574,21 @@ describe("thread outbox", () => {
     expect(
       resolveThreadOutboxDeliveryAction({
         ...input,
+        activeTurnMessageBehavior: "steer",
+      }),
+    ).toBe("send");
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        ...input,
+        threadBusy: false,
+        threadSteerable: false,
+        held: true,
+      }),
+    ).toBe("wait");
+    expect(
+      resolveThreadOutboxDeliveryAction({
+        ...input,
+        held: true,
         activeTurnMessageBehavior: "steer",
       }),
     ).toBe("send");

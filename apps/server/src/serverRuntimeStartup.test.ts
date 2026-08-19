@@ -198,6 +198,70 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
   }),
 );
 
+it.effect("holds leftover queued threads on startup even when the parent is idle", () =>
+  Effect.gen(function* () {
+    const idleQueuedThreadId = ThreadId.make("thread-idle-queued");
+    const heldQueueThreads = yield* Ref.make<ReadonlyArray<ThreadId>>([]);
+    const now = "2026-08-12T00:00:00.000Z";
+
+    yield* ServerRuntimeStartup.reconcileStaleProviderSessions.pipe(
+      Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getShellSnapshot: () =>
+          Effect.succeed({
+            snapshotSequence: 1,
+            projects: [],
+            threads: [
+              {
+                id: idleQueuedThreadId,
+                session: {
+                  threadId: idleQueuedThreadId,
+                  status: "stopped",
+                  providerName: "codex",
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  runtimeMode: "full-access",
+                  activeTurnId: null,
+                  lastError: null,
+                  updatedAt: now,
+                },
+              },
+            ],
+            updatedAt: now,
+          }),
+        getArchivedShellSnapshot: () =>
+          Effect.succeed({ snapshotSequence: 1, projects: [], threads: [], updatedAt: now }),
+      } as never),
+      Effect.provideService(ProviderService.ProviderService, {
+        listSessions: () => Effect.succeed([]),
+        stopSession: () => Effect.void,
+      } as never),
+      Effect.provideService(ThreadQueue.ThreadQueue, {
+        snapshot: Effect.succeed({
+          revision: 1,
+          messages: [{ threadId: idleQueuedThreadId }],
+          heldThreadIds: [],
+        }),
+        holdThreads: (threadIds: ReadonlyArray<ThreadId>, held: boolean) =>
+          Ref.set(heldQueueThreads, held ? threadIds : []).pipe(
+            Effect.as({
+              revision: 2,
+              messages: [{ threadId: idleQueuedThreadId }],
+              heldThreadIds: held ? threadIds : [],
+            }),
+          ),
+      } as never),
+      Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+        readEvents: () => Stream.empty,
+        dispatch: () => Effect.succeed({ sequence: 2 }),
+        streamDomainEvents: Stream.empty,
+        latestSequence: Effect.succeed(1),
+      }),
+      Effect.provide(NodeServices.layer),
+    );
+
+    assert.deepStrictEqual(yield* Ref.get(heldQueueThreads), [idleQueuedThreadId]);
+  }),
+);
+
 it.effect("resolveWelcomeBase derives cwd and project name from server config", () =>
   Effect.gen(function* () {
     const welcome = yield* ServerRuntimeStartup.resolveWelcomeBase.pipe(

@@ -42,6 +42,7 @@ import { environmentThreadShells, threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
   editingQueuedMessageIdsAtom,
+  useThreadOutboxHeldThreadKeys,
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
 } from "./use-thread-outbox";
@@ -100,6 +101,7 @@ export function useThreadOutboxDrain(): void {
   const dispatchingQueuedMessageId = useAtomValue(dispatchingQueuedMessageIdAtom);
   const editingQueuedMessageIds = useAtomValue(editingQueuedMessageIdsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
+  const heldThreadKeys = useThreadOutboxHeldThreadKeys();
   const shellStatuses = useThreadOutboxShellStatuses();
   const threads = useThreadShells();
   const projects = useProjects();
@@ -318,6 +320,7 @@ export function useThreadOutboxDrain(): void {
         threadBusy: thread?.session?.status === "running" || thread?.session?.status === "starting",
         threadSteerable: thread?.session?.status === "running",
         activeTurnMessageBehavior: nextQueuedMessage.activeTurnMessageBehavior,
+        held: Boolean(heldThreadKeys[threadKey]),
       });
       if (deliveryAction === "wait") {
         continue;
@@ -435,6 +438,7 @@ export function useThreadOutboxDrain(): void {
     connectedEnvironments,
     dispatchingQueuedMessageId,
     editingQueuedMessageIds,
+    heldThreadKeys,
     projects,
     queuedMessagesByThreadKey,
     retryTick,
