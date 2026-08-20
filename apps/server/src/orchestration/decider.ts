@@ -21,6 +21,10 @@ import {
   requireThreadNotArchived,
 } from "./commandInvariants.ts";
 import { projectEvent } from "./projector.ts";
+import {
+  isStaleApprovalFailureDetail,
+  isStaleUserInputFailureDetail,
+} from "./staleBlockingRequests.ts";
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
@@ -40,17 +44,8 @@ const QUEUED_TURN_START_GRACE_MS = 2 * 60 * 1_000;
  * rejected on threads whose shell flags read as clear.
  */
 function isStaleRequestFailureDetail(payload: Record<string, unknown> | null): boolean {
-  const detail = typeof payload?.detail === "string" ? payload.detail.toLowerCase() : null;
-  if (detail === null) return false;
-  return (
-    detail.includes("stale pending approval request") ||
-    detail.includes("unknown pending approval request") ||
-    detail.includes("unknown pending permission request") ||
-    detail.includes("stale pending user-input request") ||
-    detail.includes("unknown pending user-input request") ||
-    detail.includes("unknown pending user input request") ||
-    detail.includes("unknown pending codex user input request")
-  );
+  const detail = typeof payload?.detail === "string" ? payload.detail : null;
+  return isStaleApprovalFailureDetail(detail) || isStaleUserInputFailureDetail(detail);
 }
 
 // Scans the read model's activities, which the projector caps at the most

@@ -45,6 +45,12 @@ import {
 } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import {
+  buildStaleRequestClearingBodies,
+  collectOpenBlockingRequests,
+  staleApprovalRequestDetail,
+  staleUserInputRequestDetail,
+} from "../staleBlockingRequests.ts";
 const isProviderAdapterRequestError = Schema.is(ProviderAdapterRequestError);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 
@@ -284,7 +290,9 @@ function stalePendingRequestDetail(
   requestKind: "approval" | "user-input",
   requestId: string,
 ): string {
-  return `Stale pending ${requestKind} request: ${requestId}. Provider callback state does not survive app restarts or recovered sessions. Restart the turn to continue.`;
+  return requestKind === "approval"
+    ? staleApprovalRequestDetail(requestId)
+    : staleUserInputRequestDetail(requestId);
 }
 
 function buildGeneratedWorktreeBranchName(raw: string): string {
@@ -1216,11 +1224,16 @@ const make = Effect.gen(function* () {
     }
     const hasSession = thread.session && thread.session.status !== "stopped";
     if (!hasSession) {
+      // A stopped/missing session can never accept the response — the
+      // request is stale by definition. The stale-marked detail is what
+      // clears the pending request in every consumer (decider, projection
+      // pending accounting, client activity fold), so the thread unblocks
+      // instead of showing a dead approval forever.
       return yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.approval.respond.failed",
         summary: "Provider approval response failed",
-        detail: "No active provider session is bound to this thread.",
+        detail: staleApprovalRequestDetail(event.payload.requestId),
         turnId: null,
         createdAt: event.payload.createdAt,
         requestId: event.payload.requestId,
@@ -1260,11 +1273,13 @@ const make = Effect.gen(function* () {
       }
       const hasSession = thread.session && thread.session.status !== "stopped";
       if (!hasSession) {
+        // Same reasoning as approval responses: no session means the request
+        // can never be answered — mark it stale so pending state clears.
         return yield* appendProviderFailureActivity({
           threadId: event.payload.threadId,
           kind: "provider.user-input.respond.failed",
           summary: "Provider user input response failed",
-          detail: "No active provider session is bound to this thread.",
+          detail: staleUserInputRequestDetail(event.payload.requestId),
           turnId: null,
           createdAt: event.payload.createdAt,
           requestId: event.payload.requestId,
@@ -1324,6 +1339,25 @@ const make = Effect.gen(function* () {
       },
       createdAt: now,
     });
+
+    // A session stop is also the user-facing "declare this thread
+    // interrupted" failsafe: any open approval / user-input request was gated
+    // on callback state that just died with the session, so clear it with the
+    // stale marker instead of leaving a dead card blocking the composer.
+    // (Startup's reconcileStaleProviderSessions clears the same requests
+    // after an unclean restart; this is the manual equivalent.)
+    const openRequests = collectOpenBlockingRequests(thread.activities);
+    for (const body of buildStaleRequestClearingBodies(thread.id, openRequests)) {
+      yield* appendProviderFailureActivity({
+        threadId: body.threadId,
+        kind: body.kind,
+        summary: body.summary,
+        detail: body.detail,
+        turnId: null,
+        createdAt: now,
+        requestId: body.requestId,
+      });
+    }
   });
 
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (
