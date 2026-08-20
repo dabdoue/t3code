@@ -77,6 +77,9 @@ export function useThreadActionMenu(input: {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, {
+    reportFailure: false,
+  });
   const handleNewThread = useNewThreadHandler();
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
   const autoSettleAfterDays = useClientSettings((s) => s.sidebarAutoSettleAfterDays);
@@ -131,6 +134,7 @@ export function useThreadActionMenu(input: {
           isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
           canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
           isRegeneratingTitle,
+          hasInterruptibleSession: thread.session !== null && thread.session.status !== "stopped",
           supports,
           snoozePresets,
         });
@@ -198,6 +202,27 @@ export function useThreadActionMenu(input: {
           case "unsettle":
             await reportFailure("Failed to un-settle thread", () => unsettleThread(threadRef));
             return;
+          case "mark-interrupted": {
+            const result = await stopThreadSession({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                failureToast("Failed to mark thread interrupted", squashAtomCommandFailure(result));
+              }
+              return;
+            }
+            toastManager.add(
+              stackedThreadToast({
+                type: "success",
+                title: "Thread marked interrupted",
+                description: "Send a message to continue where the thread left off.",
+                timeout: 5_000,
+              }),
+            );
+            return;
+          }
           case "unsnooze":
             await reportFailure("Failed to wake thread", () => unsnoozeThread(threadRef));
             return;
@@ -286,6 +311,7 @@ export function useThreadActionMenu(input: {
       projectCwd,
       settleThread,
       snoozeThread,
+      stopThreadSession,
       threadRef,
       timestampFormat,
       unpinThread,

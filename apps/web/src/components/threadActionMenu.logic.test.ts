@@ -9,6 +9,7 @@ const baseState: ThreadActionMenuState = {
   isSnoozed: false,
   canSnoozeNow: true,
   isRegeneratingTitle: false,
+  hasInterruptibleSession: false,
   supports: { settlement: true, snooze: true, pinning: true, titleRegeneration: true },
   snoozePresets: [
     { id: "hour", label: "In 1 hour", whenLabel: "3:00 PM", snoozedUntil: "2026-08-07T15:00:00Z" },
@@ -50,6 +51,20 @@ describe("buildThreadActionMenuItems", () => {
     );
     expect(snooze?.disabled).toBe(true);
     expect(snooze?.children?.map((child) => child.id)).toEqual(["snooze:hour"]);
+  });
+
+  it("offers the interrupted failsafe only while a session could be stopped", () => {
+    expect(ids({ ...baseState, hasInterruptibleSession: true })).toContain("mark-interrupted");
+    expect(ids(baseState)).not.toContain("mark-interrupted");
+    // The failsafe stays available with lifecycle capabilities off — it is
+    // the escape hatch for threads the settle/snooze guards would reject.
+    expect(
+      ids({
+        ...baseState,
+        hasInterruptibleSession: true,
+        supports: { settlement: false, snooze: false, pinning: false, titleRegeneration: false },
+      }),
+    ).toContain("mark-interrupted");
   });
 
   it("disables title regeneration while one is in flight", () => {
