@@ -3453,6 +3453,12 @@ describe("ClaudeAdapterLive", () => {
           resume: "550e8400-e29b-41d4-a716-446655440000",
           resumeSessionAt: "assistant-99",
           turnCount: 3,
+          turnBoundaries: [
+            {
+              turnId: "turn-resume-1",
+              assistantUuid: "9b2c3c95-b7d7-41ef-8ff4-f632aa01b5e9",
+            },
+          ],
         },
         runtimeMode: "full-access",
       });
@@ -3463,6 +3469,12 @@ describe("ClaudeAdapterLive", () => {
         resume: "550e8400-e29b-41d4-a716-446655440000",
         resumeSessionAt: "assistant-99",
         turnCount: 3,
+        turnBoundaries: [
+          {
+            turnId: "turn-resume-1",
+            assistantUuid: "9b2c3c95-b7d7-41ef-8ff4-f632aa01b5e9",
+          },
+        ],
       });
 
       const createInput = harness.getLastCreateQueryInput();

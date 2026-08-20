@@ -131,6 +131,8 @@ interface CursorSessionContext {
   readonly pendingApprovals: Map<ApprovalRequestId, PendingApproval>;
   readonly pendingUserInputs: Map<ApprovalRequestId, PendingUserInput>;
   readonly turns: Array<{ id: TurnId; items: Array<unknown> }>;
+  /** Capability negotiated from the active ACP initialize response. */
+  readonly sessionForkSupported: boolean;
   lastPlanFingerprint: string | undefined;
   activeTurnId: TurnId | undefined;
   /** Number of sendTurn prompts currently in flight or being prepared.
@@ -776,6 +778,8 @@ export function makeCursorAdapter(
             pendingApprovals,
             pendingUserInputs,
             turns: [],
+            sessionForkSupported:
+              started.initializeResult.agentCapabilities?.sessionCapabilities?.fork != null,
             lastPlanFingerprint: undefined,
             activeTurnId: undefined,
             promptsInFlight: 0,
@@ -1129,6 +1133,65 @@ export function makeCursorAdapter(
         return { threadId, turns: ctx.turns };
       });
 
+    // ACP `session/fork` has no cutoff parameter: the fork always duplicates
+    // the full conversation, so message-edit forks re-send the edited message
+    // as a correction (capabilities.sessionFork === "full-copy").
+    const forkThread: CursorAdapterShape["forkThread"] = (threadId, input) =>
+      Effect.gen(function* () {
+        const ctx = yield* requireSession(threadId);
+        if (!ctx.sessionForkSupported) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: "The active Cursor ACP runtime did not advertise session/fork support.",
+          });
+        }
+        const sourceSessionId = parseCursorResume(ctx.session.resumeCursor)?.sessionId;
+        if (!sourceSessionId) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: `Thread '${threadId}' has no persisted Cursor session to fork.`,
+          });
+        }
+        const cwd = input.cwd ?? ctx.session.cwd;
+        if (!cwd?.trim()) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: "A working directory is required to fork a Cursor session.",
+          });
+        }
+        const response = yield* ctx.acp
+          .request("session/fork", {
+            cwd,
+            sessionId: sourceSessionId,
+          })
+          .pipe(
+            Effect.mapError((cause) =>
+              mapAcpToAdapterError(PROVIDER, threadId, "session/fork", cause),
+            ),
+          );
+        const forkedSessionId = isRecord(response)
+          ? typeof response.sessionId === "string" && response.sessionId.trim()
+            ? response.sessionId.trim()
+            : undefined
+          : undefined;
+        if (!forkedSessionId) {
+          return yield* new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId,
+            detail: "session/fork response did not include a forked session id.",
+          });
+        }
+        return {
+          resumeCursor: {
+            schemaVersion: CURSOR_RESUME_VERSION,
+            sessionId: forkedSessionId,
+          },
+        };
+      });
+
     const stopSession: CursorAdapterShape["stopSession"] = (threadId) =>
       withThreadLock(
         threadId,
@@ -1164,12 +1227,13 @@ export function makeCursorAdapter(
 
     return {
       provider: PROVIDER,
-      capabilities: { sessionModelSwitch: "in-session" },
+      capabilities: { sessionModelSwitch: "in-session", sessionFork: "full-copy" },
       startSession,
       sendTurn,
       interruptTurn,
       readThread,
       rollbackThread,
+      forkThread,
       respondToRequest,
       respondToUserInput,
       stopSession,

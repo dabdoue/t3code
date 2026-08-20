@@ -171,6 +171,9 @@ export const ServerProvider = Schema.Struct({
   continuation: Schema.optional(ServerProviderContinuation),
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
+  // How this provider can fork a conversation for message edits. Absent on
+  // legacy producers; consumers treat it as "none".
+  sessionFork: Schema.optional(Schema.Literals(["turn-granular", "full-copy", "none"])),
   enabled: Schema.Boolean,
   installed: Schema.Boolean,
   version: Schema.NullOr(TrimmedNonEmptyString),

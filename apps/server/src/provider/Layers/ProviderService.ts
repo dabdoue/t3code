@@ -19,6 +19,8 @@ import {
   ProviderSendTurnInput,
   ProviderSessionStartInput,
   ProviderStopSessionInput,
+  TrimmedNonEmptyString,
+  TurnId,
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ProviderRuntimeEvent,
@@ -74,6 +76,19 @@ type ProviderServiceMethod<Name extends keyof ProviderService.ProviderService["S
 const ProviderRollbackConversationInput = Schema.Struct({
   threadId: ThreadId,
   numTurns: NonNegativeInt,
+});
+
+const ProviderForkConversationInput = Schema.Struct({
+  threadId: ThreadId,
+  forkedThreadId: ThreadId,
+  upToTurnId: Schema.optional(TurnId),
+  cwd: Schema.optional(TrimmedNonEmptyString),
+});
+
+const ProviderResetConversationInput = Schema.Struct({
+  threadId: ThreadId,
+  upToTurnId: Schema.optional(TurnId),
+  cwd: Schema.optional(TrimmedNonEmptyString),
 });
 
 function toValidationError(
@@ -288,6 +303,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     source: {
       readonly instanceId: ProviderInstanceId;
       readonly provider: ProviderDriverKind;
+      readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
     },
     event: ProviderRuntimeEvent,
   ): Effect.Effect<void> =>
@@ -296,7 +312,39 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         increment(providerRuntimeEventsTotal, {
           provider: canonicalEvent.provider,
           eventType: canonicalEvent.type,
-        }).pipe(Effect.andThen(publishRuntimeEvent(canonicalEvent))),
+        }).pipe(
+          Effect.andThen(publishRuntimeEvent(canonicalEvent)),
+          Effect.andThen(
+            canonicalEvent.type === "turn.completed" ||
+              canonicalEvent.type === "turn.aborted" ||
+              canonicalEvent.type === "session.exited"
+              ? source.adapter.listSessions().pipe(
+                  Effect.flatMap((sessions) => {
+                    const session = sessions.find(
+                      (candidate) => candidate.threadId === canonicalEvent.threadId,
+                    );
+                    return session
+                      ? upsertSessionBinding(
+                          { ...session, providerInstanceId: source.instanceId },
+                          canonicalEvent.threadId,
+                          {
+                            lastRuntimeEvent: canonicalEvent.type,
+                            lastRuntimeEventAt: canonicalEvent.createdAt,
+                          },
+                        )
+                      : Effect.void;
+                  }),
+                  Effect.catchCause((cause) =>
+                    Effect.logWarning("provider.session.cursor-persist-failed", {
+                      threadId: canonicalEvent.threadId,
+                      provider: source.provider,
+                      cause,
+                    }),
+                  ),
+                )
+              : Effect.void,
+          ),
+        ),
       ),
     );
 
@@ -339,6 +387,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             {
               instanceId: id,
               provider: adapter.provider,
+              adapter,
             },
             event,
           ),
@@ -1065,6 +1114,171 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     );
   });
 
+  const forkConversation: ProviderServiceMethod<"forkConversation"> = Effect.fn("forkConversation")(
+    function* (rawInput) {
+      const input = yield* decodeInputOrValidationError({
+        operation: "ProviderService.forkConversation",
+        schema: ProviderForkConversationInput,
+        payload: rawInput,
+      });
+      let metricProvider = "unknown";
+      return yield* Effect.gen(function* () {
+        const existingForkBinding = Option.getOrUndefined(
+          yield* directory.getBinding(input.forkedThreadId),
+        );
+        if (
+          existingForkBinding?.resumeCursor !== null &&
+          existingForkBinding?.resumeCursor !== undefined
+        ) {
+          // Fork orchestration is replayed after a crash. Once the target has
+          // resumable provider state, repeating the native fork would create
+          // an unreachable duplicate session.
+          return;
+        }
+        const routed = yield* resolveRoutableSession({
+          threadId: input.threadId,
+          operation: "ProviderService.forkConversation",
+          allowRecovery: true,
+        });
+        metricProvider = routed.adapter.provider;
+        if (routed.adapter.capabilities.sessionFork === "none") {
+          return yield* toValidationError(
+            "ProviderService.forkConversation",
+            `Provider '${routed.adapter.provider}' does not support forking conversations.`,
+          );
+        }
+
+        const sourceBinding = yield* directory.getBinding(input.threadId);
+        const sourceBindingValue = Option.getOrUndefined(sourceBinding);
+        const forkCwd =
+          input.cwd ??
+          (sourceBindingValue ? readPersistedCwd(sourceBindingValue.runtimePayload) : undefined);
+        const sourceModelSelection = sourceBindingValue
+          ? readPersistedModelSelection(sourceBindingValue.runtimePayload)
+          : undefined;
+
+        yield* Effect.annotateCurrentSpan({
+          "provider.operation": "fork-conversation",
+          "provider.kind": routed.adapter.provider,
+          "provider.thread_id": input.threadId,
+          "provider.forked_thread_id": input.forkedThreadId,
+          ...(input.upToTurnId ? { "provider.fork_up_to_turn_id": input.upToTurnId } : {}),
+        });
+
+        const forked = yield* routed.adapter.forkThread(input.threadId, {
+          ...(input.upToTurnId ? { upToTurnId: input.upToTurnId } : {}),
+          ...(forkCwd ? { cwd: forkCwd } : {}),
+        });
+
+        // Persist a stopped binding for the fork so its first turn start
+        // recovers a provider session resuming the forked conversation.
+        yield* directory.upsert({
+          threadId: input.forkedThreadId,
+          provider: routed.adapter.provider,
+          providerInstanceId: routed.instanceId,
+          ...(routed.runtimeMode ? { runtimeMode: routed.runtimeMode } : {}),
+          status: "stopped",
+          ...(forked.resumeCursor !== undefined ? { resumeCursor: forked.resumeCursor } : {}),
+          runtimePayload: {
+            cwd: forkCwd ?? null,
+            model: null,
+            activeTurnId: null,
+            lastError: null,
+            // The fork inherits the source thread's model so its first turn
+            // resumes on the same one the copied conversation ran on.
+            ...(sourceModelSelection ? { modelSelection: sourceModelSelection } : {}),
+            lastRuntimeEvent: "provider.conversation.forked",
+          },
+        });
+        yield* analytics.record("provider.conversation.forked", {
+          provider: routed.adapter.provider,
+          sliced: input.upToTurnId !== undefined,
+        });
+      }).pipe(
+        withMetrics({
+          counter: providerTurnsTotal,
+          outcomeAttributes: () =>
+            providerMetricAttributes(metricProvider, {
+              operation: "fork",
+            }),
+        }),
+      );
+    },
+  );
+
+  const resetConversation: ProviderServiceMethod<"resetConversation"> = Effect.fn(
+    "resetConversation",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.resetConversation",
+      schema: ProviderResetConversationInput,
+      payload: rawInput,
+    });
+    let metricProvider = "unknown";
+    return yield* Effect.gen(function* () {
+      const routed = yield* resolveRoutableSession({
+        threadId: input.threadId,
+        operation: "ProviderService.resetConversation",
+        allowRecovery: true,
+      });
+      metricProvider = routed.adapter.provider;
+      if (routed.adapter.capabilities.sessionFork !== "turn-granular") {
+        return yield* toValidationError(
+          "ProviderService.resetConversation",
+          `Provider '${routed.adapter.provider}' cannot reset a conversation at a turn boundary.`,
+        );
+      }
+
+      const sourceBinding = Option.getOrUndefined(yield* directory.getBinding(input.threadId));
+      const resetCwd =
+        input.cwd ?? (sourceBinding ? readPersistedCwd(sourceBinding.runtimePayload) : undefined);
+      const replacement =
+        input.upToTurnId === undefined
+          ? undefined
+          : yield* routed.adapter.forkThread(input.threadId, {
+              upToTurnId: input.upToTurnId,
+              ...(resetCwd ? { cwd: resetCwd } : {}),
+            });
+      if (input.upToTurnId !== undefined && replacement?.resumeCursor === undefined) {
+        return yield* toValidationError(
+          "ProviderService.resetConversation",
+          `Provider '${routed.adapter.provider}' did not return resumable state for the reset conversation.`,
+        );
+      }
+
+      if (routed.isActive) {
+        yield* routed.adapter.stopSession(routed.threadId);
+      }
+      yield* clearMcpSession(input.threadId);
+      yield* directory.upsert({
+        threadId: input.threadId,
+        provider: routed.adapter.provider,
+        providerInstanceId: routed.instanceId,
+        ...(routed.runtimeMode ? { runtimeMode: routed.runtimeMode } : {}),
+        status: "stopped",
+        resumeCursor: replacement?.resumeCursor ?? null,
+        runtimePayload: {
+          ...(resetCwd ? { cwd: resetCwd } : {}),
+          activeTurnId: null,
+          lastError: null,
+          lastRuntimeEvent: "provider.conversation.reset",
+        },
+      });
+      yield* analytics.record("provider.conversation.reset", {
+        provider: routed.adapter.provider,
+        sliced: input.upToTurnId !== undefined,
+      });
+    }).pipe(
+      withMetrics({
+        counter: providerTurnsTotal,
+        outcomeAttributes: () =>
+          providerMetricAttributes(metricProvider, {
+            operation: "reset",
+          }),
+      }),
+    );
+  });
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
     const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
@@ -1136,6 +1350,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     getCapabilities,
     getInstanceInfo,
     rollbackConversation,
+    resetConversation,
+    forkConversation,
     // Each access creates a fresh PubSub subscription so that multiple
     // consumers (ProviderRuntimeIngestion, CheckpointReactor, etc.) each
     // independently receive all runtime events.

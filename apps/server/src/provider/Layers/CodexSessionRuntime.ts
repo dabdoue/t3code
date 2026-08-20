@@ -143,6 +143,14 @@ export interface CodexSessionRuntimeShape {
   readonly rollbackThread: (
     numTurns: number,
   ) => Effect.Effect<CodexThreadSnapshot, CodexSessionRuntimeError>;
+  /**
+   * Fork this provider thread (optionally slicing through `upToTurnId`) into
+   * a new Codex thread. Returns the forked thread id as a resume handle.
+   */
+  readonly forkThread: (input: {
+    readonly upToTurnId?: TurnId;
+    readonly cwd?: string;
+  }) => Effect.Effect<{ readonly threadId: string }, CodexSessionRuntimeError>;
   readonly respondToRequest: (
     requestId: ApprovalRequestId,
     decision: ProviderApprovalDecision,
@@ -876,7 +884,10 @@ function updateSession(
 }
 
 function parseThreadSnapshot(
-  response: EffectCodexSchema.V2ThreadReadResponse | EffectCodexSchema.V2ThreadRollbackResponse,
+  response:
+    | EffectCodexSchema.V2ThreadReadResponse
+    | EffectCodexSchema.V2ThreadRollbackResponse
+    | EffectCodexSchema.V2ThreadForkResponse,
 ): CodexThreadSnapshot {
   return {
     threadId: response.thread.id,
@@ -1970,6 +1981,16 @@ export const makeCodexSessionRuntime = (
             activeTurnId: undefined,
           });
           return parseThreadSnapshot(response);
+        }),
+      forkThread: (input) =>
+        Effect.gen(function* () {
+          const providerThreadId = yield* readProviderThreadId;
+          const response = yield* client.request("thread/fork", {
+            threadId: providerThreadId,
+            ...(input.upToTurnId ? { lastTurnId: input.upToTurnId } : {}),
+            ...(input.cwd ? { cwd: input.cwd } : {}),
+          });
+          return { threadId: response.thread.id };
         }),
       respondToRequest: (requestId, decision) =>
         Effect.gen(function* () {

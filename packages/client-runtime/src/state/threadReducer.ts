@@ -86,6 +86,13 @@ export function applyThreadDetailEvent(
           interactionMode: event.payload.interactionMode,
           branch: event.payload.branch,
           worktreePath: event.payload.worktreePath,
+          ...(event.payload.forkedFromThreadId !== undefined
+            ? { forkedFromThreadId: event.payload.forkedFromThreadId }
+            : {}),
+          ...(event.payload.forkPointMessageId !== undefined
+            ? { forkPointMessageId: event.payload.forkPointMessageId }
+            : {}),
+          ...(event.payload.forkKind !== undefined ? { forkKind: event.payload.forkKind } : {}),
           latestTurn: null,
           createdAt: event.payload.createdAt,
           updatedAt: event.payload.updatedAt,
@@ -596,6 +603,13 @@ export function applyThreadDetailEvent(
     case "thread.approval-response-requested":
     case "thread.user-input-response-requested":
     case "thread.checkpoint-revert-requested":
+    // The edit's effect arrives through the resolution events it triggers
+    // (thread.forked / thread.reverted / thread.message-sent / activities).
+    case "thread.message-edit-requested":
+    case "thread.message-edit-completed":
+    // The forked thread's own stream carries its thread.created + copied
+    // messages; the marker on the source changes no source state.
+    case "thread.forked":
       return { kind: "unchanged" };
   }
 
