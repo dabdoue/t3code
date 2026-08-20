@@ -14,6 +14,7 @@ import {
   type ResolvedKeybindingsConfig,
   type ScopedThreadRef,
   type ThreadId,
+  type ThreadMessageEditResolution,
   type TurnId,
   type KeybindingCommand,
   OrchestrationThreadActivity,
@@ -246,6 +247,7 @@ import { environmentShell } from "../state/shell";
 import { threadQueueEnvironment } from "../state/threadQueue";
 import { ChatComposer, type ChatComposerHandle } from "./chat/ChatComposer";
 import { DraftHeroHeadline } from "./chat/DraftHeroHeadline";
+import { EditMessageDialog, type ProviderForkMode } from "./chat/EditMessageDialog";
 import { ExpandedImageDialog } from "./chat/ExpandedImageDialog";
 import { QueuedWebThreadMessages } from "./chat/QueuedWebThreadMessages";
 import { PullRequestThreadDialog } from "./PullRequestThreadDialog";
@@ -1223,6 +1225,9 @@ function ChatViewContent(props: ChatViewProps) {
   const revertThreadCheckpoint = useAtomCommand(threadEnvironment.revertCheckpoint, {
     reportFailure: false,
   });
+  const editThreadMessage = useAtomCommand(threadEnvironment.editMessage, {
+    reportFailure: false,
+  });
   const sharedQueueUpsert = useAtomCommand(threadQueueEnvironment.upsert, { reportFailure: false });
   const sharedQueueRemove = useAtomCommand(threadQueueEnvironment.remove, { reportFailure: false });
   const sharedQueueReorder = useAtomCommand(threadQueueEnvironment.reorder, {
@@ -1349,6 +1354,13 @@ function ChatViewContent(props: ChatViewProps) {
   >({});
   const [isConnecting, _setIsConnecting] = useState(false);
   const [isRevertingCheckpoint, setIsRevertingCheckpoint] = useState(false);
+  // The user message the edit dialog is open for. Text is captured at open
+  // time so the dialog seeds from what was on screen when they clicked.
+  const [editingMessage, setEditingMessage] = useState<{
+    readonly messageId: MessageId;
+    readonly text: string;
+  } | null>(null);
+  const [isSubmittingMessageEdit, setIsSubmittingMessageEdit] = useState(false);
   const [maximizedRightPanelThreadKey, setMaximizedRightPanelThreadKey] = useState<string | null>(
     null,
   );
@@ -6274,6 +6286,91 @@ function ChatViewContent(props: ChatViewProps) {
     void onRevertToTurnCountRef.current(targetTurnCount);
   }, []);
 
+  // Same ref discipline as the revert handler: the timeline reads these
+  // callbacks through a memoized context, so their identity must be stable.
+  const timelineEntriesRef = useRef(timelineEntries);
+  timelineEntriesRef.current = timelineEntries;
+  const onEditUserMessage = useCallback((messageId: MessageId) => {
+    const entry = timelineEntriesRef.current.find(
+      (candidate) => candidate.kind === "message" && candidate.message.id === messageId,
+    );
+    if (!entry || entry.kind !== "message") {
+      return;
+    }
+    setEditingMessage({ messageId, text: entry.message.text });
+  }, []);
+
+  const activeEnvironmentIdRef = useRef(environmentId);
+  activeEnvironmentIdRef.current = environmentId;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  const onOpenThread = useCallback((threadId: ThreadId) => {
+    void navigateRef.current({
+      to: "/$environmentId/$threadId",
+      params: {
+        environmentId: activeEnvironmentIdRef.current,
+        threadId,
+      },
+    });
+  }, []);
+
+  // The thread's own provider decides which resolutions the dialog offers —
+  // not the composer's currently selected one, which may differ.
+  const editProviderForkMode: ProviderForkMode = useMemo(() => {
+    const boundInstanceId =
+      activeThread?.session?.providerInstanceId ?? activeThread?.modelSelection.instanceId ?? null;
+    const boundStatus = boundInstanceId
+      ? (providerStatuses.find((status) => status.instanceId === boundInstanceId) ?? null)
+      : null;
+    return (boundStatus ?? activeProviderStatus)?.sessionFork ?? "none";
+  }, [activeProviderStatus, activeThread, providerStatuses]);
+
+  const onSubmitMessageEdit = useCallback(
+    async (input: { text: string; resolution: ThreadMessageEditResolution }) => {
+      if (!activeThread || !editingMessage || isSubmittingMessageEdit) return;
+
+      if (activeEnvironmentUnavailable && activeEnvironmentUnavailableLabel) {
+        setThreadError(
+          activeThread.id,
+          `Reconnect ${activeEnvironmentUnavailableLabel} before editing messages.`,
+        );
+        return;
+      }
+
+      setIsSubmittingMessageEdit(true);
+      setThreadError(activeThread.id, null);
+      const result = await editThreadMessage({
+        environmentId,
+        input: {
+          threadId: activeThread.id,
+          messageId: editingMessage.messageId,
+          text: input.text,
+          resolution: input.resolution,
+        },
+      });
+      setIsSubmittingMessageEdit(false);
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        setThreadError(
+          activeThread.id,
+          error instanceof Error ? error.message : "Failed to edit message.",
+        );
+        return;
+      }
+      setEditingMessage(null);
+    },
+    [
+      activeEnvironmentUnavailable,
+      activeEnvironmentUnavailableLabel,
+      activeThread,
+      editThreadMessage,
+      editingMessage,
+      environmentId,
+      isSubmittingMessageEdit,
+      setThreadError,
+    ],
+  );
+
   // Empty state: no active thread
   if (!activeThread) {
     return <NoActiveThreadState />;
@@ -6480,6 +6577,8 @@ function ChatViewContent(props: ChatViewProps) {
                 onOpenTurnDiff={onOpenTurnDiff}
                 revertTurnCountByUserMessageId={revertTurnCountByUserMessageId}
                 onRevertUserMessage={onRevertUserMessage}
+                onEditUserMessage={onEditUserMessage}
+                onOpenThread={onOpenThread}
                 isRevertingCheckpoint={isRevertingCheckpoint}
                 onImageExpand={onExpandTimelineImage}
                 markdownCwd={gitCwd ?? undefined}
@@ -6861,6 +6960,24 @@ function ChatViewContent(props: ChatViewProps) {
           </RightPanelTabs>
         </RightPanelSheet>
       ) : null}
+
+      {editingMessage && (
+        <EditMessageDialog
+          open
+          originalText={editingMessage.text}
+          providerForkMode={editProviderForkMode}
+          turnInProgress={
+            isWorking ||
+            activeThread.session?.status === "starting" ||
+            activeThread.session?.status === "running"
+          }
+          isSubmitting={isSubmittingMessageEdit}
+          onOpenChange={(open) => {
+            if (!open) setEditingMessage(null);
+          }}
+          onSubmit={(input) => void onSubmitMessageEdit(input)}
+        />
+      )}
 
       {expandedImage && (
         <ExpandedImageDialog

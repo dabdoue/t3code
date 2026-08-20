@@ -361,6 +361,32 @@ export const ThreadTitleRegeneration = Schema.Struct({
 });
 export type ThreadTitleRegeneration = typeof ThreadTitleRegeneration.Type;
 
+/**
+ * Why a forked thread exists: "user" is a user-initiated edit-fork (a new
+ * direction taken from an edit point), "archive-tail" is the preserved tail
+ * of a rewind (everything a rewind-in-place discarded, kept as its own
+ * settled thread so no work is ever lost).
+ */
+export const ThreadForkKind = Schema.Literals(["user", "archive-tail"]);
+export type ThreadForkKind = typeof ThreadForkKind.Type;
+
+/**
+ * What the user chose to do with an edited message. "fork" branches the
+ * conversation into a new thread from the edit point; "rewind" truncates the
+ * thread in place (files restored from the edit-point checkpoint, tail
+ * archived first); "continue" keeps everything on disk and either resets the
+ * agent's context to the edit point or delivers the edit as a correction.
+ */
+export const ThreadMessageEditResolution = Schema.Union([
+  Schema.Struct({ kind: Schema.Literal("fork") }),
+  Schema.Struct({ kind: Schema.Literal("rewind") }),
+  Schema.Struct({
+    kind: Schema.Literal("continue"),
+    contextMode: Schema.Literals(["reset", "correction"]),
+  }),
+]);
+export type ThreadMessageEditResolution = typeof ThreadMessageEditResolution.Type;
+
 export const OrchestrationThread = Schema.Struct({
   id: ThreadId,
   projectId: ProjectId,
@@ -372,6 +398,10 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Fork lineage. Optional so payloads from pre-fork servers still decode.
+  forkedFromThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  forkPointMessageId: Schema.optional(Schema.NullOr(MessageId)),
+  forkKind: Schema.optional(Schema.NullOr(ThreadForkKind)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -442,6 +472,11 @@ export const OrchestrationThreadShell = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Fork lineage (see OrchestrationThread). Optional so payloads from
+  // pre-fork servers still decode.
+  forkedFromThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  forkPointMessageId: Schema.optional(Schema.NullOr(MessageId)),
+  forkKind: Schema.optional(Schema.NullOr(ThreadForkKind)),
   latestTurn: Schema.NullOr(OrchestrationLatestTurn),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
@@ -882,6 +917,17 @@ const ThreadCheckpointRevertCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadMessageEditCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.edit"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  // The sent user message being edited. The edit point for every resolution.
+  messageId: MessageId,
+  text: TrimmedNonEmptyString,
+  resolution: ThreadMessageEditResolution,
+  createdAt: IsoDateTime,
+});
+
 const ThreadSessionStopCommand = Schema.Struct({
   type: Schema.Literal("thread.session.stop"),
   commandId: CommandId,
@@ -918,6 +964,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadMessageEditCommand,
   ThreadSessionStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
@@ -946,6 +993,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
   ThreadCheckpointRevertCommand,
+  ThreadMessageEditCommand,
   ThreadSessionStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
@@ -1023,6 +1071,31 @@ const ThreadTitleRegenerationCompleteCommand = Schema.Struct({
   title: Schema.optional(TrimmedNonEmptyString),
 });
 
+const ThreadForkCommand = Schema.Struct({
+  type: Schema.Literal("thread.fork"),
+  commandId: CommandId,
+  // The new thread's id, minted server-side by the message-edit reactor.
+  forkedThreadId: ThreadId,
+  sourceThreadId: ThreadId,
+  // The last message included in the fork's transcript; null forks from the
+  // very beginning (an empty transcript — editing a thread's first message).
+  // Archive-tail forks pass the last message id explicitly so they copy
+  // everything a rewind is about to discard.
+  forkPointMessageId: Schema.NullOr(MessageId),
+  forkKind: ThreadForkKind,
+  title: TrimmedNonEmptyString,
+  createdAt: IsoDateTime,
+});
+
+const ThreadMessageEditCompleteCommand = Schema.Struct({
+  type: Schema.Literal("thread.message.edit.complete"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  requestEventId: EventId,
+  outcome: Schema.Literals(["succeeded", "failed"]),
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
   ThreadSessionSetCommand,
   ThreadMessageAssistantDeltaCommand,
@@ -1032,6 +1105,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadActivityAppendCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
+  ThreadForkCommand,
+  ThreadMessageEditCompleteCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
 
@@ -1066,6 +1141,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.user-input-response-requested",
   "thread.checkpoint-revert-requested",
   "thread.reverted",
+  "thread.message-edit-requested",
+  "thread.message-edit-completed",
+  "thread.forked",
   "thread.session-stop-requested",
   "thread.session-set",
   "thread.proposed-plan-upserted",
@@ -1119,6 +1197,11 @@ export const ThreadCreatedPayload = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  // Fork lineage; absent on threads that were not created by forking.
+  // Optional so persisted events from pre-fork servers still decode.
+  forkedFromThreadId: Schema.optional(Schema.NullOr(ThreadId)),
+  forkPointMessageId: Schema.optional(Schema.NullOr(MessageId)),
+  forkKind: Schema.optional(Schema.NullOr(ThreadForkKind)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
@@ -1272,6 +1355,36 @@ export const ThreadCheckpointRevertRequestedPayload = Schema.Struct({
 export const ThreadRevertedPayload = Schema.Struct({
   threadId: ThreadId,
   turnCount: NonNegativeInt,
+});
+
+export const ThreadMessageEditRequestedPayload = Schema.Struct({
+  threadId: ThreadId,
+  messageId: MessageId,
+  text: Schema.String,
+  resolution: ThreadMessageEditResolution,
+  // Durable edit-point context lets the reactor finish a rewind after the
+  // source transcript has already been truncated and the server restarts.
+  messageIndex: Schema.optional(NonNegativeInt),
+  attachments: Schema.optional(Schema.Array(ChatAttachment)),
+  contextBoundaryTurnId: Schema.optional(TurnId),
+  editTurnCount: Schema.optional(NonNegativeInt),
+  currentTurnCount: Schema.optional(NonNegativeInt),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadMessageEditCompletedPayload = Schema.Struct({
+  threadId: ThreadId,
+  requestEventId: EventId,
+  outcome: Schema.Literals(["succeeded", "failed"]),
+  createdAt: IsoDateTime,
+});
+
+export const ThreadForkedPayload = Schema.Struct({
+  threadId: ThreadId,
+  sourceThreadId: ThreadId,
+  forkPointMessageId: Schema.NullOr(MessageId),
+  forkKind: ThreadForkKind,
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadSessionStopRequestedPayload = Schema.Struct({
@@ -1446,6 +1559,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.reverted"),
     payload: ThreadRevertedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.message-edit-requested"),
+    payload: ThreadMessageEditRequestedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.message-edit-completed"),
+    payload: ThreadMessageEditCompletedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.forked"),
+    payload: ThreadForkedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

@@ -222,4 +222,37 @@ it.layer(TestLayer)("CheckpointStore.layer", (it) => {
       }),
     );
   });
+
+  describe("checkpoint lineage", () => {
+    it.effect("records the repository base commit and can copy a checkpoint ref", () =>
+      Effect.gen(function* () {
+        const tmp = yield* makeTmpDir();
+        yield* initRepoWithCommit(tmp);
+        const checkpointStore = yield* CheckpointStore.CheckpointStore;
+        const sourceRef = checkpointRefForThreadTurn(ThreadId.make("checkpoint-source"), 0);
+        const copiedRef = checkpointRefForThreadTurn(ThreadId.make("checkpoint-copy"), 0);
+        const head = yield* git(tmp, ["rev-parse", "HEAD"]);
+
+        yield* writeTextFile(NodePath.join(tmp, "README.md"), "checkpoint contents\n");
+        yield* checkpointStore.captureCheckpoint({ cwd: tmp, checkpointRef: sourceRef });
+
+        expect(
+          yield* checkpointStore.resolveCheckpointBaseCommit({
+            cwd: tmp,
+            checkpointRef: sourceRef,
+          }),
+        ).toBe(head);
+        expect(
+          yield* checkpointStore.copyCheckpointRef({
+            cwd: tmp,
+            fromCheckpointRef: sourceRef,
+            toCheckpointRef: copiedRef,
+          }),
+        ).toBe(true);
+        expect(yield* git(tmp, ["rev-parse", sourceRef])).toBe(
+          yield* git(tmp, ["rev-parse", copiedRef]),
+        );
+      }),
+    );
+  });
 });

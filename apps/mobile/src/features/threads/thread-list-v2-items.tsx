@@ -91,6 +91,30 @@ const LEGACY_MENU_ACTIONS: MenuAction[] = [
 /** Rounded-row radius shared with the v1 sidebar rows. */
 const SIDEBAR_V2_ROW_RADIUS = 12;
 
+function ThreadForkBadge(props: {
+  readonly forkKind: EnvironmentThreadShell["forkKind"];
+  readonly selected: boolean;
+}) {
+  if (!props.forkKind) return null;
+  return (
+    <View
+      className={cn(
+        "self-start rounded-md px-1.5 py-0.5",
+        props.selected ? "bg-white/15" : "bg-subtle",
+      )}
+    >
+      <Text
+        className={cn(
+          "text-[10px] font-t3-semibold uppercase tracking-wide",
+          props.selected ? "text-user-bubble-foreground-muted" : "text-foreground-tertiary",
+        )}
+      >
+        {props.forkKind === "archive-tail" ? "Archive" : "Fork"}
+      </Text>
+    </View>
+  );
+}
+
 /** Section label + rule: the only structure in an otherwise flat list. */
 export const ThreadListV2SectionDivider = memo(function ThreadListV2SectionDivider(props: {
   readonly label: string;
@@ -658,15 +682,18 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
           {statusLabel?.label ?? timeLabel}
         </Text>
       </View>
-      <Text
-        className={cn(
-          "mt-1 text-base font-t3-medium",
-          selected ? "text-user-bubble-foreground" : "text-foreground",
-        )}
-        numberOfLines={2}
-      >
-        {thread.title}
-      </Text>
+      <View className="mt-1 flex-row items-start gap-2">
+        <ThreadForkBadge forkKind={thread.forkKind} selected={selected} />
+        <Text
+          className={cn(
+            "min-w-0 flex-1 text-base font-t3-medium",
+            selected ? "text-user-bubble-foreground" : "text-foreground",
+          )}
+          numberOfLines={2}
+        >
+          {thread.title}
+        </Text>
+      </View>
       {props.searchMatch ? (
         <View className="mt-1">
           <ThreadSearchMatchExcerpt
@@ -828,9 +855,10 @@ export const ThreadListV2Row = memo(function ThreadListV2Row(props: {
             </View>
           ) : null}
           <View className="min-w-0 flex-1">
+            <ThreadForkBadge forkKind={thread.forkKind} selected={selected} />
             <Text
               className={cn(
-                "text-base",
+                thread.forkKind ? "mt-1 text-base" : "text-base",
                 selected ? "text-user-bubble-foreground" : "text-foreground-muted",
               )}
               numberOfLines={1}

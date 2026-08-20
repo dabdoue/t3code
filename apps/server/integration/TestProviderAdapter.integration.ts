@@ -479,10 +479,20 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
         sessions.clear();
       });
 
+    const forkThread: ProviderAdapterShape<ProviderAdapterError>["forkThread"] = () =>
+      Effect.fail(
+        new ProviderAdapterValidationError({
+          provider,
+          operation: "forkThread",
+          issue: "Test adapter does not implement forking.",
+        }),
+      );
+
     const adapter: ProviderAdapterShape<ProviderAdapterError> = {
       provider,
       capabilities: {
         sessionModelSwitch: "in-session",
+        sessionFork: "none",
       },
       startSession,
       sendTurn,
@@ -494,6 +504,7 @@ export const makeTestProviderAdapterHarness = (options?: MakeTestProviderAdapter
       hasSession,
       readThread,
       rollbackThread,
+      forkThread,
       stopAll,
       streamEvents: Stream.fromQueue(runtimeEvents),
     };

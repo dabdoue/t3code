@@ -57,6 +57,7 @@ export interface ServerProviderPresentation {
   readonly badgeLabel?: string;
   readonly showInteractionModeToggle?: boolean;
   readonly requiresNewThreadForModelChange?: boolean;
+  readonly sessionFork?: "turn-granular" | "full-copy" | "none";
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -233,6 +234,7 @@ export function buildServerProvider(input: {
     ...(typeof input.presentation.requiresNewThreadForModelChange === "boolean"
       ? { requiresNewThreadForModelChange: input.presentation.requiresNewThreadForModelChange }
       : {}),
+    ...(input.presentation.sessionFork ? { sessionFork: input.presentation.sessionFork } : {}),
     enabled: input.enabled,
     installed: input.probe.installed,
     version: input.probe.version,

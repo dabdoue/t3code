@@ -3,6 +3,7 @@ import {
   type MessageId,
   type ScopedThreadRef,
   type ServerProviderSkill,
+  type ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
 import { parseScopedThreadKey } from "@t3tools/client-runtime/environment";
@@ -46,12 +47,14 @@ import {
 } from "../../lib/diffRendering";
 import ChatMarkdown from "../ChatMarkdown";
 import {
+  ArchiveIcon,
   BotIcon,
   CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
+  GitBranchIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -138,6 +141,8 @@ interface TimelineRowSharedState {
   skills: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   activeThreadEnvironmentId: EnvironmentId;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onEditUserMessage: (messageId: MessageId) => void;
+  onOpenThread: (threadId: ThreadId) => void;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   onToggleTurnFold: (turnId: TurnId) => void;
@@ -217,6 +222,8 @@ interface MessagesTimelineProps {
   onOpenTurnDiff: (turnId: TurnId, filePath?: string) => void;
   revertTurnCountByUserMessageId: Map<MessageId, number>;
   onRevertUserMessage: (messageId: MessageId) => void;
+  onEditUserMessage: (messageId: MessageId) => void;
+  onOpenThread: (threadId: ThreadId) => void;
   isRevertingCheckpoint: boolean;
   onImageExpand: (preview: ExpandedImagePreview) => void;
   activeThreadEnvironmentId: EnvironmentId;
@@ -263,6 +270,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
   onOpenTurnDiff,
   revertTurnCountByUserMessageId,
   onRevertUserMessage,
+  onEditUserMessage,
+  onOpenThread,
   isRevertingCheckpoint,
   onImageExpand,
   activeThreadEnvironmentId,
@@ -511,6 +520,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onEditUserMessage,
+      onOpenThread,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -527,6 +538,8 @@ export const MessagesTimeline = memo(function MessagesTimeline({
       skills,
       activeThreadEnvironmentId,
       onRevertUserMessage,
+      onEditUserMessage,
+      onOpenThread,
       onImageExpand,
       onOpenTurnDiff,
       onToggleTurnFold,
@@ -979,6 +992,10 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
   const previewImages = userImages.filter((image) => image.name.startsWith("preview-annotation-"));
   const regularImages = userImages.filter((image) => !image.name.startsWith("preview-annotation-"));
   const canRevertAgentWork = typeof row.revertTurnCount === "number";
+  // Any sent user message on a server thread can be edited; the resolution
+  // dialog gates what's possible from there (fork-only mid-turn, etc.). Local
+  // draft threads have no threadRef and nothing to edit against.
+  const canEditSentMessage = ctx.threadRef !== null;
 
   return (
     <div className="group flex flex-col items-end gap-1">
@@ -1051,6 +1068,7 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             </TooltipPopup>
           </Tooltip>
           <div className="flex items-center gap-0.5">
+            {canEditSentMessage && <EditUserMessageButton messageId={row.message.id} />}
             {canRevertAgentWork && <RevertUserMessageButton messageId={row.message.id} />}
             {displayedUserMessage.copyText && (
               <MessageCopyButton text={displayedUserMessage.copyText} variant="ghost" />
@@ -1083,6 +1101,29 @@ function RevertUserMessageButton({ messageId }: { messageId: MessageId }) {
         <Undo2Icon className="size-3" />
       </TooltipTrigger>
       <TooltipPopup side="top">Revert to this message</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+function EditUserMessageButton({ messageId }: { messageId: MessageId }) {
+  const ctx = use(TimelineRowCtx);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost"
+            onClick={() => ctx.onEditUserMessage(messageId)}
+            aria-label="Edit message"
+          />
+        }
+      >
+        <SquarePenIcon className="size-3" />
+      </TooltipTrigger>
+      <TooltipPopup side="top">Edit message</TooltipPopup>
     </Tooltip>
   );
 }
@@ -1940,10 +1981,12 @@ function formatWorkingTimerNow(startIso: string): string {
 }
 
 type WorkEntryIconName =
+  | "archive"
   | "bot"
   | "check"
   | "circle-alert"
   | "eye"
+  | "git-branch"
   | "globe"
   | "hammer"
   | "message-circle"
@@ -1955,6 +1998,8 @@ type WorkEntryIconName =
 
 function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; className: string }) {
   switch (name) {
+    case "archive":
+      return <ArchiveIcon className={className} aria-hidden />;
     case "bot":
       return <BotIcon className={className} aria-hidden />;
     case "check":
@@ -1963,6 +2008,8 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
       return <CircleAlertIcon className={className} aria-hidden />;
     case "eye":
       return <EyeIcon className={className} aria-hidden />;
+    case "git-branch":
+      return <GitBranchIcon className={className} aria-hidden />;
     case "globe":
       return <GlobeIcon className={className} aria-hidden />;
     case "hammer":
@@ -2211,14 +2258,56 @@ const AgentSpawnCtaRow = memo(function AgentSpawnCtaRow(props: { workEntry: Time
   );
 });
 
+/**
+ * The row a message-edit leaves behind on the source thread: the fork it
+ * created, or the archive holding the turns a rewind discarded. Clicking
+ * navigates to that thread — without it the produced thread is only findable
+ * by hunting the sidebar.
+ */
+const LinkedThreadCtaRow = memo(function LinkedThreadCtaRow(props: {
+  workEntry: TimelineWorkEntry;
+}) {
+  const { workEntry } = props;
+  const { onOpenThread } = use(TimelineRowCtx);
+  const linkedThreadId = workEntry.linkedThreadId;
+  if (!linkedThreadId) {
+    return null;
+  }
+  const isArchive = workEntry.sourceActivityKind === "thread.tail-archived";
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenThread(linkedThreadId)}
+      className="-mx-1 flex w-full items-center gap-2 rounded-md border border-border/60 bg-card/50 px-2.5 py-1.5 text-left text-[13px] transition hover:bg-accent/50"
+    >
+      <WorkEntryIconSvg
+        name={isArchive ? "archive" : "git-branch"}
+        className="size-3.5 shrink-0 text-muted-foreground"
+      />
+      <span className="min-w-0 truncate">
+        <span className="font-medium">
+          {isArchive ? "Archived the discarded turns" : "Forked from this message"}
+        </span>
+      </span>
+      <span className="ml-auto shrink-0 font-mono text-[.7rem] text-info-foreground">
+        {isArchive ? "Open archive ▸" : "Open fork ▸"}
+      </span>
+    </button>
+  );
+});
+
 const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   workEntry: TimelineWorkEntry;
   workspaceRoot: string | undefined;
 }) {
   const { workEntry, workspaceRoot } = props;
-  // Before any hooks: spawn CTA rows render their own component.
+  // Before any hooks: CTA rows render their own component.
   if (workEntry.agentSpawn) {
     return <AgentSpawnCtaRow workEntry={workEntry} />;
+  }
+  if (workEntry.linkedThreadId) {
+    return <LinkedThreadCtaRow workEntry={workEntry} />;
   }
   return <PlainWorkEntryRow workEntry={workEntry} workspaceRoot={workspaceRoot} />;
 });

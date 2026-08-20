@@ -561,6 +561,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
             }}
           >
             <View className="flex-row items-center justify-between gap-2">
+              <ThreadForkBadge forkKind={thread.forkKind} />
               <Text className="flex-1 text-lg font-t3-bold text-foreground" numberOfLines={1}>
                 {thread.title}
               </Text>
@@ -614,6 +615,7 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
       >
         <View className="gap-[3px]">
           <View className="flex-row items-center justify-between gap-2">
+            <ThreadForkBadge forkKind={thread.forkKind} selected={selected} />
             <Text
               className={cn(
                 "flex-1 text-base font-t3-medium",
@@ -684,3 +686,19 @@ export const ThreadListRow = memo(function ThreadListRow(props: {
     </ThreadSwipeable>
   );
 });
+function ThreadForkBadge(props: {
+  readonly forkKind: EnvironmentThreadShell["forkKind"];
+  readonly selected?: boolean;
+}) {
+  if (!props.forkKind) return null;
+  return (
+    <Text
+      className={cn(
+        "mr-2 rounded-md bg-subtle px-1.5 py-0.5 text-[10px] font-t3-semibold uppercase tracking-wide",
+        props.selected ? "text-user-bubble-foreground-muted" : "text-foreground-tertiary",
+      )}
+    >
+      {props.forkKind === "archive-tail" ? "Archive" : "Fork"}
+    </Text>
+  );
+}

@@ -11,13 +11,14 @@ import type {
   ProviderApprovalDecision,
   ProviderInteractionMode,
   RuntimeMode,
+  ThreadMessageEditResolution,
   ServerConfig as T3ServerConfig,
   ThreadId,
 } from "@t3tools/contracts";
 import type { ActiveTurnMessageBehavior } from "@t3tools/contracts/settings";
 import * as Haptics from "expo-haptics";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Platform, View, type GestureResponderEvent } from "react-native";
+import { Alert, Platform, View, type GestureResponderEvent } from "react-native";
 import { KeyboardController, KeyboardStickyView } from "react-native-keyboard-controller";
 import Animated, { FadeInDown, FadeOut } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -41,6 +42,7 @@ import {
   ThreadComposer,
 } from "./ThreadComposer";
 import { ThreadFeed } from "./ThreadFeed";
+import { EditMessageModal } from "./EditMessageModal";
 import type { ThreadContentPresentation } from "./threadContentPresentation";
 
 export interface ThreadDetailScreenProps {
@@ -83,6 +85,11 @@ export interface ThreadDetailScreenProps {
   readonly onStopThread: () => void;
   readonly onSetQueuedAutoSend: (enabled: boolean) => void;
   readonly onSendMessage: () => Promise<MessageId | null>;
+  readonly onEditUserMessage: (input: {
+    readonly messageId: MessageId;
+    readonly text: string;
+    readonly resolution: ThreadMessageEditResolution;
+  }) => Promise<void>;
   readonly onReconnectEnvironment: () => void;
   readonly onUpdateThreadModelSelection: (modelSelection: ModelSelection) => void;
   readonly onUpdateThreadRuntimeMode: (runtimeMode: RuntimeMode) => void;
@@ -229,13 +236,41 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
   const layoutVariant = props.layoutVariant ?? "compact";
   const isSplitLayout = layoutVariant === "split";
   const contentMaxWidth = isSplitLayout ? CHAT_CONTENT_MAX_WIDTH : undefined;
-  const selectedInstanceId = props.selectedThread.modelSelection.instanceId;
+  const selectedInstanceId =
+    props.selectedThread.session?.providerInstanceId ??
+    props.selectedThread.modelSelection.instanceId;
+  const selectedProvider = props.serverConfig?.providers.find(
+    (provider) => provider.instanceId === selectedInstanceId,
+  );
   useStreamingHaptics(props.selectedThread.id, props.selectedThreadFeed);
-  const selectedProviderSkills = useMemo(
-    () =>
-      props.serverConfig?.providers.find((provider) => provider.instanceId === selectedInstanceId)
-        ?.skills ?? [],
-    [props.serverConfig, selectedInstanceId],
+  const selectedProviderSkills = useMemo(() => selectedProvider?.skills ?? [], [selectedProvider]);
+  const providerForkMode = selectedProvider?.sessionFork ?? "none";
+  const [editingMessage, setEditingMessage] = useState<{
+    readonly messageId: MessageId;
+    readonly text: string;
+  } | null>(null);
+  const [submittingEdit, setSubmittingEdit] = useState(false);
+  const handleSubmitEdit = useCallback(
+    async (input: { readonly text: string; readonly resolution: ThreadMessageEditResolution }) => {
+      if (!editingMessage || submittingEdit) return;
+      setSubmittingEdit(true);
+      try {
+        await props.onEditUserMessage({
+          messageId: editingMessage.messageId,
+          text: input.text,
+          resolution: input.resolution,
+        });
+        setEditingMessage(null);
+      } catch (error) {
+        Alert.alert(
+          "Message edit failed",
+          error instanceof Error ? error.message : "The message could not be edited.",
+        );
+      } finally {
+        setSubmittingEdit(false);
+      }
+    },
+    [editingMessage, props.onEditUserMessage, submittingEdit],
   );
 
   useLayoutEffect(() => {
@@ -378,6 +413,7 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
             onHeaderMaterialVisibilityChange={props.onHeaderMaterialVisibilityChange}
             skills={selectedProviderSkills}
             loadEarlier={props.loadEarlier ?? null}
+            onEditUserMessage={(messageId, text) => setEditingMessage({ messageId, text })}
           />
         </View>
       ) : (
@@ -458,6 +494,20 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
           </View>
         </KeyboardStickyView>
       ) : null}
+
+      <EditMessageModal
+        visible={editingMessage !== null}
+        initialText={editingMessage?.text ?? ""}
+        providerForkMode={providerForkMode}
+        threadBusy={props.activeThreadBusy}
+        submitting={submittingEdit}
+        onCancel={() => {
+          if (!submittingEdit) setEditingMessage(null);
+        }}
+        onSubmit={(input) => {
+          void handleSubmitEdit(input);
+        }}
+      />
     </View>
   );
 });

@@ -76,6 +76,17 @@ export class CheckpointStore extends Context.Service<
       input: RestoreCheckpointInput,
     ) => Effect.Effect<boolean, CheckpointStoreError>;
 
+    readonly copyCheckpointRef: (input: {
+      readonly cwd: string;
+      readonly fromCheckpointRef: CheckpointRef;
+      readonly toCheckpointRef: CheckpointRef;
+    }) => Effect.Effect<boolean, CheckpointStoreError>;
+
+    /** Resolve the source HEAD recorded as the checkpoint commit's parent. */
+    readonly resolveCheckpointBaseCommit: (
+      input: Omit<RestoreCheckpointInput, "fallbackToHead">,
+    ) => Effect.Effect<string | null, CheckpointStoreError>;
+
     /**
      * Compute a patch diff between two checkpoint refs.
      *
@@ -140,6 +151,22 @@ export const make = Effect.gen(function* () {
     return yield* checkpoints.restoreCheckpoint(input);
   });
 
+  const resolveCheckpointBaseCommit: CheckpointStore["Service"]["resolveCheckpointBaseCommit"] =
+    Effect.fn("resolveCheckpointBaseCommit")(function* (input) {
+      const checkpoints = yield* resolveCheckpoints(
+        "CheckpointStore.resolveCheckpointBaseCommit",
+        input.cwd,
+      );
+      return yield* checkpoints.resolveCheckpointBaseCommit(input);
+    });
+
+  const copyCheckpointRef: CheckpointStore["Service"]["copyCheckpointRef"] = Effect.fn(
+    "copyCheckpointRef",
+  )(function* (input) {
+    const checkpoints = yield* resolveCheckpoints("CheckpointStore.copyCheckpointRef", input.cwd);
+    return yield* checkpoints.copyCheckpointRef(input);
+  });
+
   const diffCheckpoints: CheckpointStore["Service"]["diffCheckpoints"] = Effect.fn(
     "diffCheckpoints",
   )(function* (input) {
@@ -162,6 +189,8 @@ export const make = Effect.gen(function* () {
     captureCheckpoint,
     hasCheckpointRef,
     restoreCheckpoint,
+    copyCheckpointRef,
+    resolveCheckpointBaseCommit,
     diffCheckpoints,
     deleteCheckpointRefs,
   });
