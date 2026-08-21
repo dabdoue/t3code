@@ -984,6 +984,23 @@ routing.layer("ProviderServiceLive routing", (it) => {
       const imageOnlyInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
       assert.equal(imageOnlyInput.input?.startsWith('[Attached image "screenshot.png"'), true);
 
+      const fileAttachment = {
+        type: "file" as const,
+        id: "thread-attach-12345678-1234-1234-1234-123456789abd",
+        name: "measurements.parquet",
+        mimeType: "application/vnd.apache.parquet",
+        sizeBytes: 456,
+      };
+      routing.codex.sendTurn.mockClear();
+      yield* provider.sendTurn({
+        threadId: session.threadId,
+        input: "analyze this dataset",
+        attachments: [fileAttachment],
+      });
+      const fileInput = routing.codex.sendTurn.mock.calls[0]?.[0] as ProviderSendTurnInput;
+      assert.include(fileInput.input ?? "", '[Attached file "measurements.parquet" is saved at: ');
+      assert.equal(fileInput.input?.endsWith(`${fileAttachment.id}.bin]`), true);
+
       yield* provider.stopSession({ threadId: session.threadId });
     }),
   );

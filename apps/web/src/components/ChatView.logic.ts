@@ -10,6 +10,8 @@ import {
   type ScopedThreadRef,
   type ThreadId,
   type TurnId,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
 } from "@t3tools/contracts";
 import { type ChatMessage, type SessionPhase, type Thread, type ThreadShell } from "../types";
 import { type ComposerImageAttachment, type DraftThreadState } from "../composerDraftStore";
@@ -27,6 +29,32 @@ export const LAST_INVOKED_SCRIPT_BY_PROJECT_KEY = "t3code:last-invoked-script-by
 export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 export const MAX_HIDDEN_MOUNTED_PREVIEW_THREADS = 3;
 export const ENVIRONMENT_RECONNECT_WARNING_GRACE_MS = 2_000;
+
+export function selectComposerAttachmentFiles(
+  files: ReadonlyArray<File>,
+  reservedCount: number,
+): { acceptedFiles: File[]; error: string | null } {
+  const acceptedFiles: File[] = [];
+  let nextReservedCount = reservedCount;
+  let error: string | null = null;
+  for (const file of files) {
+    if (file.size === 0) {
+      error = `'${file.name}' is empty and cannot be attached.`;
+      continue;
+    }
+    if (!file.type.startsWith("image/") && file.size > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+      error = `'${file.name}' exceeds the 10 MB attachment limit.`;
+      continue;
+    }
+    if (nextReservedCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
+      error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
+      break;
+    }
+    acceptedFiles.push(file);
+    nextReservedCount += 1;
+  }
+  return { acceptedFiles, error };
+}
 
 export function insertEditedQueuedMessage(
   queuedMessageIds: ReadonlyArray<MessageId>,
@@ -227,9 +255,6 @@ export function revokeUserMessagePreviewUrls(message: ChatMessage): void {
     return;
   }
   for (const attachment of message.attachments) {
-    if (attachment.type !== "image") {
-      continue;
-    }
     revokeBlobPreviewUrl(attachment.previewUrl);
   }
 }
@@ -260,10 +285,10 @@ export function readFileAsDataUrl(file: File): Promise<string> {
         resolve(reader.result);
         return;
       }
-      reject(new Error("Could not read image data."));
+      reject(new Error("Could not read attachment data."));
     });
     reader.addEventListener("error", () => {
-      reject(reader.error ?? new Error("Failed to read image."));
+      reject(reader.error ?? new Error("Failed to read attachment."));
     });
     reader.readAsDataURL(file);
   });

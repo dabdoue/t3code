@@ -676,9 +676,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       );
     }
 
-    // Adapters inline attachment pixels into the model prompt, but the model's
-    // tools cannot dereference pixels. Appending the on-disk path is what lets
-    // a turn like "include this screenshot in the PR" copy the actual file.
+    // Adapters inline supported image pixels into the model prompt, while
+    // arbitrary files travel by their persisted path. Appending every on-disk
+    // path also lets a turn like "include this screenshot in the PR" copy the
+    // actual image file instead of only seeing its pixels.
     // This runs after schema decode, so the appended lines are exempt from the
     // PROVIDER_SEND_TURN_MAX_INPUT_CHARS check; attachment count is capped, so
     // the overhead is bounded. Unresolvable ids are skipped here and surface

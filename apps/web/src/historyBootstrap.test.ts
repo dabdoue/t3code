@@ -107,7 +107,7 @@ describe("buildBootstrapInput", () => {
     expect(result.truncated).toBe(true);
   });
 
-  it("captures user image attachment context in transcript blocks", () => {
+  it("captures user file attachment context in transcript blocks", () => {
     const result = buildBootstrapInput(
       [
         {
@@ -122,6 +122,13 @@ describe("buildBootstrapInput", () => {
               mimeType: "image/png",
               sizeBytes: 2_048,
             },
+            {
+              type: "file",
+              id: "file-1",
+              name: "trace.har",
+              mimeType: "application/json",
+              sizeBytes: 4_096,
+            },
           ],
           createdAt: "2026-02-09T00:00:00.000Z",
           turnId: null,
@@ -133,7 +140,8 @@ describe("buildBootstrapInput", () => {
       1_500,
     );
 
-    expect(result.text).toContain("Attached image");
+    expect(result.text).toContain("Attachments");
     expect(result.text).toContain("screenshot.png");
+    expect(result.text).toContain("trace.har");
   });
 });

@@ -47,8 +47,8 @@ function createEnumerableMemoryStorage(): EnumerableStorage {
   };
 }
 
-const QueuedWebImageAttachment = Schema.Struct({
-  type: Schema.Literal("image"),
+const QueuedWebAttachment = Schema.Struct({
+  type: Schema.Literals(["image", "file"]),
   name: Schema.String,
   mimeType: Schema.String,
   sizeBytes: Schema.Number,
@@ -62,7 +62,7 @@ const QueuedWebThreadMessageSchema = Schema.Struct({
   commandId: CommandId,
   text: Schema.String,
   composerText: Schema.optional(Schema.String),
-  attachments: Schema.Array(QueuedWebImageAttachment),
+  attachments: Schema.Array(QueuedWebAttachment),
   modelSelection: ModelSelection,
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,

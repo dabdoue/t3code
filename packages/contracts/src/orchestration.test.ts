@@ -3,6 +3,7 @@ import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import {
+  ClientOrchestrationCommand,
   DEFAULT_PROVIDER_INTERACTION_MODE,
   DEFAULT_RUNTIME_MODE,
   ModelSelection,
@@ -52,7 +53,40 @@ function getOptionValue(
 const decodeThreadCreatedPayload = Schema.decodeUnknownEffect(ThreadCreatedPayload);
 const decodeOrchestrationCommand = Schema.decodeUnknownEffect(OrchestrationCommand);
 const decodeOrchestrationEvent = Schema.decodeUnknownEffect(OrchestrationEvent);
+const decodeClientOrchestrationCommand = Schema.decodeUnknownEffect(ClientOrchestrationCommand);
 const decodeThreadMetaUpdatedPayload = Schema.decodeUnknownEffect(ThreadMetaUpdatedPayload);
+
+it.effect("accepts arbitrary file uploads in client turn commands", () =>
+  Effect.gen(function* () {
+    const parsed = yield* decodeClientOrchestrationCommand({
+      type: "thread.turn.start",
+      commandId: "command-file-upload",
+      threadId: "thread-file-upload",
+      message: {
+        messageId: "message-file-upload",
+        role: "user",
+        text: "Inspect this file",
+        attachments: [
+          {
+            type: "file",
+            name: "measurements.parquet",
+            mimeType: "application/vnd.apache.parquet",
+            sizeBytes: 5,
+            dataUrl: "data:application/vnd.apache.parquet;base64,aGVsbG8=",
+          },
+        ],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: "2026-08-21T00:00:00.000Z",
+    });
+
+    assert.strictEqual(parsed.type, "thread.turn.start");
+    if (parsed.type === "thread.turn.start") {
+      assert.strictEqual(parsed.message.attachments[0]?.type, "file");
+    }
+  }),
+);
 
 it.effect("parses turn diff input when fromTurnCount <= toTurnCount", () =>
   Effect.gen(function* () {
