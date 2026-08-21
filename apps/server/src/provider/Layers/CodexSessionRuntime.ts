@@ -41,6 +41,7 @@ import { codexSessionAppServerArgs } from "./codexLaunchArgs.ts";
 import { expandHomePath } from "../../pathExpansion.ts";
 import { buildCodexDeveloperInstructions } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -490,11 +491,20 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
   return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
 }
 
+export function isCodexThreadActiveWriterError(error: unknown): boolean {
+  if (!isCodexAppServerRequestError(error) || error.code !== -32600) {
+    return false;
+  }
+  const message = error.errorMessage.toLowerCase();
+  return message.includes("thread") && message.includes("already has an active writer");
+}
+
 type CodexThreadOpenResponse =
   | CodexRpc.ClientRequestResponsesByMethod["thread/start"]
-  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"];
+  | CodexRpc.ClientRequestResponsesByMethod["thread/resume"]
+  | CodexRpc.ClientRequestResponsesByMethod["thread/fork"];
 
-type CodexThreadOpenMethod = "thread/start" | "thread/resume";
+type CodexThreadOpenMethod = "thread/start" | "thread/resume" | "thread/fork";
 
 interface CodexThreadOpenClient {
   readonly request: <M extends CodexThreadOpenMethod>(
@@ -519,10 +529,19 @@ export const openCodexThread = (input: {
     model: input.requestedModel,
     serviceTier: input.serviceTier,
   });
-
   if (resumeThreadId === undefined) {
     return input.client.request("thread/start", startParams);
   }
+  const threadConfig = runtimeModeToThreadConfig(input.runtimeMode);
+  const forkParams = {
+    threadId: resumeThreadId,
+    cwd: input.cwd,
+    approvalPolicy: threadConfig.approvalPolicy,
+    sandbox: threadConfig.sandbox,
+    approvalsReviewer: threadConfig.approvalsReviewer,
+    ...(input.requestedModel ? { model: input.requestedModel } : {}),
+    ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+  } satisfies EffectCodexSchema.V2ThreadForkParams;
 
   return input.client
     .request("thread/resume", {
@@ -530,6 +549,15 @@ export const openCodexThread = (input: {
       ...startParams,
     })
     .pipe(
+      Effect.catchIf(isCodexThreadActiveWriterError, (error) =>
+        Effect.logWarning("codex app-server thread resume forked around an active writer", {
+          threadId: input.threadId,
+          requestedRuntimeMode: input.runtimeMode,
+          resumeThreadId,
+          recoverable: true,
+          cause: error,
+        }).pipe(Effect.andThen(input.client.request("thread/fork", forkParams))),
+      ),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
         Effect.logWarning("codex app-server thread resume fell back to fresh start", {
           threadId: input.threadId,

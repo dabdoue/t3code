@@ -18,6 +18,7 @@ import {
   buildTurnSteerParams,
   buildTurnStartParams,
   hasConfiguredMcpServer,
+  isCodexThreadActiveWriterError,
   isRecoverableThreadResumeError,
   openCodexThread,
   resolveCodexSteerReconciliation,
@@ -460,13 +461,51 @@ describe("isRecoverableThreadResumeError", () => {
   });
 });
 
+describe("isCodexThreadActiveWriterError", () => {
+  it("matches the Codex single-writer conflict", () => {
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "thread provider-thread-1 already has an active writer",
+        }),
+      ),
+      true,
+    );
+  });
+
+  it("requires the active-writer request code and message", () => {
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "thread provider-thread-1 already has an active writer",
+        }),
+      ),
+      false,
+    );
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "thread provider-thread-1 is archived",
+        }),
+      ),
+      false,
+    );
+  });
+});
+
 describe("openCodexThread", () => {
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {
@@ -501,10 +540,61 @@ describe("openCodexThread", () => {
     }),
   );
 
+  it.effect("forks the resumed thread when Codex reports another active writer", () =>
+    Effect.gen(function* () {
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
+      const forked = makeThreadOpenResponse("forked-thread");
+      const client = {
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
+          method: M,
+          payload: CodexRpc.ClientRequestParamsByMethod[M],
+        ) => {
+          calls.push({ method, payload });
+          if (method === "thread/resume") {
+            return Effect.fail(
+              new CodexErrors.CodexAppServerRequestError({
+                code: -32600,
+                errorMessage: "thread provider-thread-1 already has an active writer",
+              }),
+            );
+          }
+          return Effect.succeed(forked as CodexRpc.ClientRequestResponsesByMethod[M]);
+        },
+      };
+
+      const opened = yield* openCodexThread({
+        client,
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "provider-thread-1",
+      });
+
+      NodeAssert.equal(opened.thread.id, "forked-thread");
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => call.method),
+        ["thread/resume", "thread/fork"],
+      );
+      NodeAssert.deepStrictEqual(calls[1]?.payload, {
+        threadId: "provider-thread-1",
+        cwd: "/tmp/project",
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+        approvalsReviewer: "user",
+        model: "gpt-5.3-codex",
+      });
+    }),
+  );
+
   it.effect("propagates non-recoverable resume failures", () =>
     Effect.gen(function* () {
       const client = {
-        request: <M extends "thread/start" | "thread/resume">(
+        request: <M extends "thread/start" | "thread/resume" | "thread/fork">(
           method: M,
           _payload: CodexRpc.ClientRequestParamsByMethod[M],
         ) => {
