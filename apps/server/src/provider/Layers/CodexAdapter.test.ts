@@ -360,6 +360,40 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
     }),
   );
 
+  it.effect("leaves arbitrary files on the prompt path instead of sending them as images", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      yield* adapter.startSession({
+        provider: ProviderDriverKind.make("codex"),
+        threadId: asThreadId("sess-file-attachment"),
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      NodeAssert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      yield* Effect.ignore(
+        adapter.sendTurn({
+          threadId: asThreadId("sess-file-attachment"),
+          input: '[Attached file "results.csv" is saved at: /tmp/results.bin]',
+          attachments: [
+            {
+              type: "file",
+              id: "sess-file-attachment-12345678-1234-1234-1234-123456789abc",
+              name: "results.csv",
+              mimeType: "text/csv",
+              sizeBytes: 12,
+            },
+          ],
+        }),
+      );
+
+      NodeAssert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
+        input: '[Attached file "results.csv" is saved at: /tmp/results.bin]',
+      });
+    }),
+  );
+
   it.effect("passes configured launch args into the session runtime", () => {
     const runtimeFactory = makeRuntimeFactory();
     const layer = Layer.effect(

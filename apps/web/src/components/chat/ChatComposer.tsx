@@ -41,7 +41,11 @@ import {
   replaceTextRange,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
-import { deriveComposerSendState, readFileAsDataUrl } from "../ChatView.logic";
+import {
+  deriveComposerSendState,
+  readFileAsDataUrl,
+  selectComposerAttachmentFiles,
+} from "../ChatView.logic";
 import {
   dataTransferHasComposerMention,
   makeComposerMentionDragHandlers,
@@ -194,6 +198,7 @@ import { toastManager } from "../ui/toast";
 import {
   BotIcon,
   CircleAlertIcon,
+  FileIcon,
   PencilRulerIcon,
   type LucideIcon,
   LockIcon,
@@ -1458,7 +1463,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [activeThreadId, composerFooterActionLayoutKey, composerFooterHasWideActions]);
 
   // ------------------------------------------------------------------
-  // Image persist effect
+  // Attachment persist effect
   // ------------------------------------------------------------------
   useEffect(() => {
     let cancelled = false;
@@ -1480,6 +1485,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             try {
               const dataUrl = await readFileAsDataUrl(image.file);
               stagedAttachmentById.set(image.id, {
+                type: image.type,
                 id: image.id,
                 name: image.name,
                 mimeType: image.mimeType,
@@ -1912,7 +1918,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Prompt stash (⌘S)
   // ------------------------------------------------------------------
-  // One global queue. Stashed prompts carry only text + images so they can be
+  // One global queue. Stashed prompts carry only text + attachments so they can be
   // restored into any thread or provider — stash, switch, restore is the
   // whole point.
   const stashQueue = usePromptStashStore((state) => state.entries);
@@ -1958,7 +1964,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setIsStashMenuOpen(false);
 
       const currentPrompt = promptRef.current;
-      // An image-only stash must not append blank lines to whatever is
+      // An attachment-only stash must not append blank lines to whatever is
       // already in the composer.
       const nextPrompt =
         entry.prompt.length === 0
@@ -2027,19 +2033,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }
       if (unrestoredImageNames.length > 0) {
         missingImageReasons.push(
-          `${unrestoredImageNames.join(", ")} could not be restored: the composer is at its ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}-image limit.`,
+          `${unrestoredImageNames.join(", ")} could not be restored: the composer is at its ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS}-attachment limit.`,
         );
       }
       if (missingImageReasons.length > 0) {
         toastManager.add({
           type: "warning",
-          title: "Some images were not restored",
+          title: "Some attachments were not restored",
           description: missingImageReasons.join(" "),
         });
       }
 
       // Only yank the caret to the end when text was actually inserted;
-      // restoring images alone should leave the user where they were typing.
+      // restoring attachments alone should leave the user where they were typing.
       if (promptChanged) {
         window.requestAnimationFrame(() => {
           composerEditorRef.current?.focusAtEnd();
@@ -2137,7 +2143,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         });
       }
 
-      // Only the prompt and images are cleared — terminal/element contexts,
+      // Only the prompt and attachments are cleared — terminal/element contexts,
       // preview annotations, and review comments are not stashable, so
       // destroying them here would be unrecoverable.
       promptRef.current = "";
@@ -2163,6 +2169,21 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const oversizedImageNames: string[] = [];
       const unreadableImageNames: string[] = [];
       for (const image of images) {
+        if (image.type === "file") {
+          try {
+            candidateAttachments.push({
+              type: "file",
+              id: image.id,
+              name: image.name,
+              mimeType: image.mimeType,
+              sizeBytes: image.sizeBytes,
+              dataUrl: await readFileAsDataUrl(image.file),
+            });
+          } catch {
+            unreadableImageNames.push(image.name);
+          }
+          continue;
+        }
         const result = await compressImageForStash(image.file);
         if (!result.ok) {
           // "too large" and "could not be read" are distinct outcomes; the
@@ -2173,6 +2194,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           continue;
         }
         candidateAttachments.push({
+          type: "image",
           id: image.id,
           name: image.name,
           mimeType: result.image.mimeType,
@@ -2197,9 +2219,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         if (!imagesDurable && durable && images.length > 0) {
           toastManager.add({
             type: "warning",
-            title: "Stashed images were not saved",
+            title: "Stashed attachments were not saved",
             description:
-              "The prompt was stashed, but browser storage rejected its images. They will be missing if you reload.",
+              "The prompt was stashed, but browser storage rejected its attachments. They will be missing if you reload.",
             data: { hideCopyButton: true },
           });
         }
@@ -2209,8 +2231,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         // them evaporate.
         toastManager.add({
           type: "warning",
-          title: "Stashed images did not attach",
-          description: `That prompt was restored or deleted before ${kept.length} image${kept.length === 1 ? "" : "s"} finished saving. Re-attach ${kept.length === 1 ? "it" : "them"} if you still need ${kept.length === 1 ? "it" : "them"}.`,
+          title: "Stashed attachments did not attach",
+          description: `That prompt was restored or deleted before ${kept.length} attachment${kept.length === 1 ? "" : "s"} finished saving. Re-attach ${kept.length === 1 ? "it" : "them"} if you still need ${kept.length === 1 ? "it" : "them"}.`,
           data: { hideCopyButton: true },
         });
       }
@@ -2284,14 +2306,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   ]);
 
   // ------------------------------------------------------------------
-  // Callbacks: images
+  // Callbacks: attachments
   // ------------------------------------------------------------------
   const addComposerImages = async (files: File[]) => {
     if (!activeThreadId || files.length === 0) return;
     if (pendingUserInputs.length > 0) {
       toastManager.add({
         type: "error",
-        title: "Attach images after answering plan questions.",
+        title: "Attach files after answering plan questions.",
       });
       return;
     }
@@ -2304,21 +2326,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     // accepted files reserve their attachment slots (via the pending counter)
     // before the first await, keeping the total under the limit.
     const pendingCount = pendingImageCompressionsRef.current.get(threadId) ?? 0;
-    let reservedCount = composerImagesRef.current.length + pendingCount;
-    const acceptedFiles: File[] = [];
-    let error: string | null = null;
-    for (const file of files) {
-      if (!file.type.startsWith("image/")) {
-        error = `Unsupported file type for '${file.name}'. Please attach image files only.`;
-        continue;
-      }
-      if (reservedCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} images per message.`;
-        break;
-      }
-      acceptedFiles.push(file);
-      reservedCount += 1;
-    }
+    const { acceptedFiles, error } = selectComposerAttachmentFiles(
+      files,
+      composerImagesRef.current.length + pendingCount,
+    );
     setThreadError(threadId, error);
     if (acceptedFiles.length === 0) return;
 
@@ -2327,20 +2338,31 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const nextImages: ComposerImageAttachment[] = [];
       let compressionError: string | null = null;
       for (const file of acceptedFiles) {
-        // Images over the wire cap are downscaled to fit rather than
-        // refused; files already within it pass through byte-for-byte.
-        const compressed = await compressImageToByteLimit(file, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
-        if (!compressed.ok) {
-          compressionError =
-            compressed.reason === "unreadable"
-              ? `'${file.name}' could not be read as an image.`
-              : `'${file.name}' is too large to attach, even after compression.`;
-          continue;
+        let attachmentFile = file;
+        if (file.type.startsWith("image/")) {
+          // Images over the wire cap are downscaled to fit. Other files are
+          // transported byte-for-byte and were size-checked above.
+          const compressed = await compressImageToByteLimit(
+            file,
+            PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+          );
+          if (!compressed.ok) {
+            compressionError =
+              compressed.reason === "unreadable"
+                ? `'${file.name}' could not be read as an image.`
+                : `'${file.name}' is too large to attach, even after compression.`;
+            continue;
+          }
+          attachmentFile = compressed.file;
+        } else if (!file.type) {
+          attachmentFile = new File([file], file.name, {
+            type: "application/octet-stream",
+            lastModified: file.lastModified,
+          });
         }
-        const attachmentFile = compressed.file;
         const previewUrl = URL.createObjectURL(attachmentFile);
         nextImages.push({
-          type: "image",
+          type: attachmentFile.type.startsWith("image/") ? "image" : "file",
           id: randomUUID(),
           name: attachmentFile.name || "image",
           mimeType: attachmentFile.type,
@@ -2382,10 +2404,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const onComposerPaste = (event: React.ClipboardEvent<HTMLElement>) => {
     const files = Array.from(event.clipboardData.files);
     if (files.length === 0) return;
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
-    if (imageFiles.length === 0) return;
     event.preventDefault();
-    void addComposerImages(imageFiles);
+    void addComposerImages(files);
   };
 
   const onComposerDragEnter = (event: React.DragEvent<HTMLDivElement>) => {
@@ -2965,9 +2985,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     .map((image) => (
                       <div
                         key={image.id}
-                        className="relative h-16 w-16 overflow-hidden rounded-lg border border-border/80 bg-background"
+                        className={cn(
+                          "relative h-16 overflow-hidden rounded-lg border border-border/80 bg-background",
+                          image.type === "image" ? "w-16" : "min-w-40 max-w-64",
+                        )}
                       >
-                        {image.previewUrl ? (
+                        {image.type === "image" && image.previewUrl ? (
                           <button
                             type="button"
                             className="h-full w-full cursor-zoom-in"
@@ -2984,6 +3007,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               className="h-full w-full object-cover"
                             />
                           </button>
+                        ) : image.type === "file" ? (
+                          <a
+                            href={image.previewUrl}
+                            download={image.name}
+                            className="flex h-full min-w-0 items-center gap-2 px-3 pr-8 text-left text-secondary-label hover:text-foreground"
+                            title={image.name}
+                          >
+                            <FileIcon className="size-5 shrink-0" />
+                            <span className="min-w-0 truncate text-xs">{image.name}</span>
+                          </a>
                         ) : (
                           <div className="flex h-full w-full items-center justify-center px-1 text-center text-[10px] text-secondary-label">
                             {image.name}
@@ -3059,7 +3092,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                           : noProviderAvailable
                             ? "Enable a provider in Settings to send a message"
                             : phase === "disconnected"
-                              ? "Ask for follow-up changes or attach images"
+                              ? "Ask for follow-up changes or attach files"
                               : "Ask anything, @tag files/folders, $use skills, or / for commands"
                 }
                 disabled={isConnecting || isComposerApprovalState || projectSelectionRequired}

@@ -115,6 +115,29 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("accepts persisted arbitrary file attachments", () => {
+    const parsed = decodeProviderSendTurnInput({
+      threadId: "thread-1",
+      attachments: [
+        {
+          type: "file",
+          id: "thread-1-attachment",
+          name: "measurements.parquet",
+          mimeType: "application/vnd.apache.parquet",
+          sizeBytes: 4_096,
+        },
+      ],
+    });
+
+    expect(parsed.attachments?.[0]).toEqual({
+      type: "file",
+      id: "thread-1-attachment",
+      name: "measurements.parquet",
+      mimeType: "application/vnd.apache.parquet",
+      sizeBytes: 4_096,
+    });
+  });
+
   it("accepts codex modelSelection", () => {
     const parsed = decodeProviderSendTurnInput({
       threadId: "thread-1",

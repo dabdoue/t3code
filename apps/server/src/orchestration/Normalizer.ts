@@ -7,13 +7,34 @@ import {
   type IsoDateTime,
   type OrchestrationCommand,
   OrchestrationDispatchCommandError,
-  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+  PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES,
+  type UploadChatAttachment,
 } from "@t3tools/contracts";
 
 import { createAttachmentId, resolveAttachmentPath } from "../attachmentStore.ts";
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+
+export function parseUploadAttachmentPayload(
+  attachment: UploadChatAttachment,
+):
+  | { readonly ok: true; readonly bytes: Buffer; readonly mimeType: string }
+  | { readonly ok: false; readonly reason: "invalid" | "empty-or-too-large" } {
+  const parsed = parseBase64DataUrl(attachment.dataUrl);
+  if (
+    !parsed ||
+    parsed.mimeType !== attachment.mimeType.toLowerCase() ||
+    (attachment.type === "image" && !parsed.mimeType.startsWith("image/"))
+  ) {
+    return { ok: false, reason: "invalid" };
+  }
+  const bytes = Buffer.from(parsed.base64, "base64");
+  if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_ATTACHMENT_BYTES) {
+    return { ok: false, reason: "empty-or-too-large" };
+  }
+  return { ok: true, bytes, mimeType: parsed.mimeType };
+}
 
 export const canonicalizeClientCommandTimestamps = (
   command: ClientOrchestrationCommand,
@@ -108,19 +129,18 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
       canonicalCommand.message.attachments,
       (attachment) =>
         Effect.gen(function* () {
-          const parsed = parseBase64DataUrl(attachment.dataUrl);
-          if (!parsed || !parsed.mimeType.startsWith("image/")) {
+          const payload = parseUploadAttachmentPayload(attachment);
+          if (!payload.ok && payload.reason === "invalid") {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Invalid image attachment payload for '${attachment.name}'.`,
+              message: `Invalid attachment payload for '${attachment.name}'.`,
             });
           }
-
-          const bytes = Buffer.from(parsed.base64, "base64");
-          if (bytes.byteLength === 0 || bytes.byteLength > PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) {
+          if (!payload.ok) {
             return yield* new OrchestrationDispatchCommandError({
-              message: `Image attachment '${attachment.name}' is empty or too large.`,
+              message: `Attachment '${attachment.name}' is empty or too large.`,
             });
           }
+          const { bytes } = payload;
 
           const attachmentId = createAttachmentId(canonicalCommand.threadId);
           if (!attachmentId) {
@@ -130,10 +150,10 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           }
 
           const persistedAttachment = {
-            type: "image" as const,
+            type: attachment.type,
             id: attachmentId,
             name: attachment.name,
-            mimeType: parsed.mimeType.toLowerCase(),
+            mimeType: payload.mimeType,
             sizeBytes: bytes.byteLength,
           };
 

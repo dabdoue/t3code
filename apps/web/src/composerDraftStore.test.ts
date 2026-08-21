@@ -66,6 +66,7 @@ import {
   markPromotedDraftThreads,
   markPromotedDraftThreadsByRef,
   type ComposerImageAttachment,
+  hydrateImagesFromPersisted,
   useComposerDraftStore,
   DraftId,
 } from "./composerDraftStore";
@@ -103,6 +104,39 @@ function makeImage(input: {
     file,
   };
 }
+
+describe("hydrateImagesFromPersisted", () => {
+  it("preserves arbitrary files as file attachments", () => {
+    const [attachment] = hydrateImagesFromPersisted([
+      {
+        type: "file",
+        id: "file-1",
+        name: "measurements.csv",
+        mimeType: "text/csv",
+        sizeBytes: 4,
+        dataUrl: "data:text/csv;base64,YSxiCg==",
+      },
+    ]);
+
+    expect(attachment?.type).toBe("file");
+    expect(attachment?.name).toBe("measurements.csv");
+    expect(attachment?.file.type).toBe("text/csv");
+  });
+
+  it("keeps legacy persisted attachments image-compatible", () => {
+    const [attachment] = hydrateImagesFromPersisted([
+      {
+        id: "legacy-image",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 1,
+        dataUrl: "data:image/png;base64,AA==",
+      },
+    ]);
+
+    expect(attachment?.type).toBe("image");
+  });
+});
 
 function makeTerminalContext(input: {
   id: string;

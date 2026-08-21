@@ -52,6 +52,7 @@ import {
   ChevronRightIcon,
   CircleAlertIcon,
   EyeIcon,
+  FileIcon,
   GlobeIcon,
   HammerIcon,
   MessageCircleIcon,
@@ -960,7 +961,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
 
 function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const userImages = row.message.attachments ?? [];
+  const userAttachments = row.message.attachments ?? [];
+  const userImages = userAttachments.filter((attachment) => attachment.type === "image");
+  const userFiles = userAttachments.filter((attachment) => attachment.type === "file");
   const displayedUserMessage = deriveDisplayedUserMessageState(row.message.text);
   const terminalContexts = displayedUserMessage.contexts;
   const previewAnnotations: ParsedPreviewAnnotation[] = [];
@@ -1016,6 +1019,33 @@ function UserTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" 
             ))}
           </div>
         )}
+        {userFiles.length > 0 ? (
+          <div className="mb-2 flex max-w-[420px] flex-col gap-1.5">
+            {userFiles.map((file) =>
+              file.previewUrl ? (
+                <a
+                  key={file.id}
+                  href={file.previewUrl}
+                  download={file.name}
+                  className="flex min-w-0 items-center gap-2 rounded-lg border border-border/80 bg-background/70 px-2.5 py-2 text-foreground/90 hover:bg-background"
+                  title={file.name}
+                >
+                  <FileIcon className="size-4 shrink-0" />
+                  <span className="min-w-0 truncate text-xs font-medium">{file.name}</span>
+                </a>
+              ) : (
+                <div
+                  key={file.id}
+                  className="flex min-w-0 items-center gap-2 rounded-lg border border-border/80 bg-background/70 px-2.5 py-2 text-foreground/90"
+                  title={file.name}
+                >
+                  <FileIcon className="size-4 shrink-0" />
+                  <span className="min-w-0 truncate text-xs font-medium">{file.name}</span>
+                </div>
+              ),
+            )}
+          </div>
+        ) : null}
         {previewAnnotations.map((annotation, index) => (
           <UserMessagePreviewAnnotationCard
             key={annotation.id}

@@ -404,6 +404,14 @@ describe("MessagesTimeline", () => {
             sizeBytes: 1,
             previewUrl: "data:image/png;base64,iVBORw0KGgo=",
           },
+          {
+            type: "file" as const,
+            id: "attachment-2",
+            name: "trace.har",
+            mimeType: "application/json",
+            sizeBytes: 2,
+            previewUrl: "https://example.test/attachment-2",
+          },
         ],
       },
     };
@@ -428,6 +436,9 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain('data-maintain-visible-content-position-data="true"');
     expect(markup).toContain('data-maintain-visible-content-position-size="true"');
     expect(markup).toContain('data-maintain-visible-content-position-restore="true"');
+    expect(markup).toContain("trace.har");
+    expect(markup).toContain('download="trace.har"');
+    expect(markup).toContain("lucide-file");
     expect(onAnchorReady).toHaveBeenCalledOnce();
     expect(onAnchorReady).toHaveBeenCalledWith(secondEntry.message.id, 1);
   });
