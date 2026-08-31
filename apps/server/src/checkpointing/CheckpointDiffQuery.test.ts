@@ -58,6 +58,8 @@ describe("CheckpointDiffQuery.layer", () => {
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
+        resolveCheckpointBaseCommit: () => Effect.succeed(null),
+        copyCheckpointRef: () => Effect.succeed(true),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
@@ -167,6 +169,8 @@ describe("CheckpointDiffQuery.layer", () => {
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
+        resolveCheckpointBaseCommit: () => Effect.succeed(null),
+        copyCheckpointRef: () => Effect.succeed(true),
         diffCheckpoints: ({ fromCheckpointRef, toCheckpointRef, cwd, ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({
@@ -256,6 +260,8 @@ describe("CheckpointDiffQuery.layer", () => {
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
+        resolveCheckpointBaseCommit: () => Effect.succeed(null),
+        copyCheckpointRef: () => Effect.succeed(true),
         diffCheckpoints: ({ ignoreWhitespace }) =>
           Effect.sync(() => {
             diffCheckpointsCalls.push({ ignoreWhitespace });
@@ -329,6 +335,8 @@ describe("CheckpointDiffQuery.layer", () => {
             return true;
           }),
         restoreCheckpoint: () => Effect.succeed(true),
+        resolveCheckpointBaseCommit: () => Effect.succeed(null),
+        copyCheckpointRef: () => Effect.succeed(true),
         diffCheckpoints: () => Effect.succeed("diff patch"),
         deleteCheckpointRefs: () => Effect.void,
       };
@@ -383,6 +391,8 @@ describe("CheckpointDiffQuery.layer", () => {
         captureCheckpoint: () => Effect.void,
         hasCheckpointRef: () => Effect.succeed(true),
         restoreCheckpoint: () => Effect.succeed(true),
+        resolveCheckpointBaseCommit: () => Effect.succeed(null),
+        copyCheckpointRef: () => Effect.succeed(true),
         diffCheckpoints: () => Effect.succeed(""),
         deleteCheckpointRefs: () => Effect.void,
       };

@@ -42,6 +42,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   GitBranchIcon,
+  GitForkIcon,
   EllipsisIcon,
   MessageSquareIcon,
   PinIcon,
@@ -244,6 +245,7 @@ function SidebarThreadTooltip({
   branchMismatch,
   terminalStatus,
   terminalProcessCount,
+  parentThreadTitle,
 }: {
   thread: SidebarThreadSummary;
   projectTitle: string | null;
@@ -259,6 +261,7 @@ function SidebarThreadTooltip({
   } | null;
   terminalStatus: TerminalStatusIndicator | null;
   terminalProcessCount: number;
+  parentThreadTitle: string | null;
 }) {
   return (
     <TooltipPopup
@@ -294,6 +297,15 @@ function SidebarThreadTooltip({
             <div className="flex min-w-0 items-center gap-2">
               <GitBranchIcon className="size-3 shrink-0 stroke-muted-foreground" />
               <div className="min-w-0 truncate text-foreground/75">{thread.branch}</div>
+            </div>
+          ) : null}
+          {thread.forkKind ? (
+            <div className="flex min-w-0 items-center gap-2">
+              <GitForkIcon className="size-3 shrink-0 stroke-muted-foreground" />
+              <div className="min-w-0 truncate text-foreground/75">
+                {thread.forkKind === "archive-tail" ? "Archived tail" : "Fork"}
+                {parentThreadTitle ? ` of ${parentThreadTitle}` : ""}
+              </div>
             </div>
           ) : null}
           {branchMismatch ? (
@@ -676,6 +688,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   projectCwd: string | null;
   projectFaviconPath: string | null;
   projectTitle: string | null;
+  parentThreadTitle: string | null;
   providerEntryByInstanceId: ReadonlyMap<string, ProviderInstanceEntry>;
   timestampFormat: TimestampFormat;
   onThreadClick: (event: ReactMouseEvent, threadRef: ScopedThreadRef) => void;
@@ -873,6 +886,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
       branchMismatch={branchMismatch}
       terminalStatus={terminalStatus}
       terminalProcessCount={terminalProcessCount}
+      parentThreadTitle={props.parentThreadTitle}
     />
   );
 
@@ -1038,7 +1052,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   ) : (
     <span
       className={cn(
-        "min-w-0 flex-1 text-sm transition-opacity motion-reduce:transition-none",
+        "min-w-0 flex flex-1 items-center gap-1.5 text-sm transition-opacity motion-reduce:transition-none",
         shouldRecede ? "font-normal" : "font-medium",
         variant === "card"
           ? cn(
@@ -1062,7 +1076,16 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         isRegeneratingTitle && "opacity-[0.55]",
       )}
     >
-      {thread.title}
+      {thread.forkKind ? (
+        <span
+          aria-label={thread.forkKind === "archive-tail" ? "Archived tail" : "Fork"}
+          className="inline-flex shrink-0 items-center gap-1 rounded bg-muted px-1 py-0.5 text-[10px] font-medium text-muted-foreground"
+        >
+          <GitForkIcon className="size-2.5" />
+          {variant === "card" ? (thread.forkKind === "archive-tail" ? "Archive" : "Fork") : null}
+        </span>
+      ) : null}
+      <span className="min-w-0 truncate">{thread.title}</span>
     </span>
   );
 
@@ -1559,6 +1582,7 @@ const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props: {
           branchMismatch={branchMismatch}
           terminalStatus={terminalStatus}
           terminalProcessCount={runningTerminalIds.length}
+          parentThreadTitle={null}
         />
       </Tooltip>
     </li>
@@ -3512,6 +3536,15 @@ export default function Sidebar() {
                           projectDisplayNameByKey.get(
                             `${thread.environmentId}:${thread.projectId}`,
                           ) ?? null
+                        }
+                        parentThreadTitle={
+                          thread.forkedFromThreadId
+                            ? (threadByKey.get(
+                                scopedThreadKey(
+                                  scopeThreadRef(thread.environmentId, thread.forkedFromThreadId),
+                                ),
+                              )?.title ?? null)
+                            : null
                         }
                         providerEntryByInstanceId={providerEntryByInstanceId}
                         timestampFormat={timestampFormat}

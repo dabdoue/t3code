@@ -148,6 +148,7 @@ export interface ThreadFeedProps {
   readonly layoutVariant?: LayoutVariant;
   readonly usesAutomaticContentInsets?: boolean;
   readonly onHeaderMaterialVisibilityChange?: (visible: boolean) => void;
+  readonly onEditUserMessage?: (messageId: MessageId, text: string) => void;
   readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
   /** Non-null when older turns exist beyond the loaded window. */
   readonly loadEarlier?: {
@@ -856,7 +857,7 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
 
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
-  props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
+  props: Pick<ThreadFeedProps, "environmentId" | "skills" | "onEditUserMessage"> & {
     readonly copiedRowId: string | null;
     readonly expandedWorkRows: Record<string, boolean>;
     readonly terminalAssistantMessageIds: ReadonlySet<string>;
@@ -940,7 +941,20 @@ function renderFeedEntry(
           className="mb-5 items-end"
           {...(enterAnimated ? { entering: FadeInUp.duration(220) } : {})}
         >
-          <View
+          <Pressable
+            accessibilityRole={props.onEditUserMessage ? "button" : undefined}
+            accessibilityHint={
+              props.onEditUserMessage ? "Long press to edit this message." : undefined
+            }
+            delayLongPress={350}
+            onLongPress={
+              props.onEditUserMessage
+                ? () => {
+                    void Haptics.selectionAsync();
+                    props.onEditUserMessage?.(message.id, message.text);
+                  }
+                : undefined
+            }
             className="min-w-0 gap-2 rounded-[20px] px-3.5 py-2.5"
             style={{
               backgroundColor: userBubbleColor,
@@ -976,7 +990,7 @@ function renderFeedEntry(
                 />
               );
             })}
-          </View>
+          </Pressable>
           <View className="mt-1 flex-row items-center justify-end gap-1 pr-0.5">
             <Text className="font-t3-medium text-xs tabular-nums text-neutral-600 dark:text-neutral-400">
               {timestampLabel}
@@ -1830,6 +1844,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
         reviewCommentBubbleWidth,
         userBubbleMaxWidth,
         skills: props.skills,
+        onEditUserMessage: props.onEditUserMessage,
       }),
     [
       copiedRowId,
@@ -1849,6 +1864,7 @@ export const ThreadFeed = memo(function ThreadFeed(props: ThreadFeedProps) {
       onToggleWorkGroup,
       onToggleWorkRow,
       props.environmentId,
+      props.onEditUserMessage,
       props.skills,
     ],
   );

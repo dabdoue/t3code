@@ -1903,6 +1903,24 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     );
   };
 
+  const forkThread: CodexAdapterShape["forkThread"] = (threadId, input) =>
+    requireSession(threadId).pipe(
+      Effect.flatMap((session) =>
+        session.runtime.forkThread({
+          ...(input.upToTurnId ? { upToTurnId: input.upToTurnId } : {}),
+          ...(input.cwd ? { cwd: input.cwd } : {}),
+        }),
+      ),
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderAdapterSessionNotFoundError"
+          ? cause
+          : mapCodexRuntimeError(threadId, "thread/fork", cause),
+      ),
+      Effect.map((forked) => ({
+        resumeCursor: { threadId: forked.threadId },
+      })),
+    );
+
   const respondToRequest: CodexAdapterShape["respondToRequest"] = (threadId, requestId, decision) =>
     requireSession(threadId).pipe(
       Effect.flatMap((session) => session.runtime.respondToRequest(requestId, decision)),
@@ -1984,12 +2002,14 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      sessionFork: "turn-granular",
     },
     startSession,
     sendTurn,
     interruptTurn,
     readThread,
     rollbackThread,
+    forkThread,
     respondToRequest,
     respondToUserInput,
     stopSession,

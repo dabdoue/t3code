@@ -1,5 +1,7 @@
 import {
   EventId,
+  MessageId,
+  type TurnId,
   type OrchestrationCommand,
   type OrchestrationEvent,
   type OrchestrationReadModel,
@@ -1115,6 +1117,102 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       };
     }
 
+    case "thread.message.edit": {
+      const thread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const message = thread.messages.find((entry) => entry.id === command.messageId);
+      if (message === undefined || message.role !== "user") {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Message '${command.messageId}' is not an editable user message on thread '${command.threadId}'.`,
+        });
+      }
+
+      // Forking is safe while a turn runs — the source thread's turn keeps
+      // going and the fork slices at the last completed turn. Rewind and
+      // continue mutate this thread in place, so they require the session to
+      // be idle: no active turn and no turn start still awaiting adoption.
+      if (command.resolution.kind !== "fork") {
+        const sessionBusy =
+          thread.session?.status === "starting" || thread.session?.status === "running";
+        if (sessionBusy || threadHasQueuedTurnStart(thread, command.createdAt)) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Cannot ${command.resolution.kind} an edit while a turn is running on thread '${command.threadId}'. Wait for the turn to finish, or fork instead.`,
+          });
+        }
+      }
+
+      const messageIndex = thread.messages.findIndex((entry) => entry.id === command.messageId);
+      let editTurnId: TurnId | undefined;
+      for (let index = messageIndex + 1; index < thread.messages.length; index += 1) {
+        const candidate = thread.messages[index];
+        if (!candidate || candidate.role === "user") break;
+        if (candidate.turnId !== null) {
+          editTurnId = candidate.turnId;
+          break;
+        }
+      }
+      const editTurnCount = editTurnId
+        ? thread.checkpoints.find((checkpoint) => checkpoint.turnId === editTurnId)
+            ?.checkpointTurnCount
+        : undefined;
+      let contextBoundaryTurnId: TurnId | undefined;
+      for (let index = messageIndex - 1; index >= 0; index -= 1) {
+        const turnId = thread.messages[index]?.turnId;
+        if (turnId !== null && turnId !== undefined) {
+          contextBoundaryTurnId = turnId;
+          break;
+        }
+      }
+
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-edit-requested",
+        payload: {
+          threadId: command.threadId,
+          messageId: command.messageId,
+          text: command.text,
+          resolution: command.resolution,
+          messageIndex,
+          attachments: [...(message.attachments ?? [])],
+          ...(contextBoundaryTurnId ? { contextBoundaryTurnId } : {}),
+          ...(editTurnCount !== undefined ? { editTurnCount } : {}),
+          currentTurnCount: thread.checkpoints.reduce(
+            (maximum, checkpoint) => Math.max(maximum, checkpoint.checkpointTurnCount),
+            0,
+          ),
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
+    case "thread.message.edit.complete": {
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.message-edit-completed",
+        payload: {
+          threadId: command.threadId,
+          requestEventId: command.requestEventId,
+          outcome: command.outcome,
+          createdAt: command.createdAt,
+        },
+      };
+    }
+
     case "thread.session.stop": {
       const thread = yield* requireThread({
         readModel,
@@ -1383,6 +1481,140 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       return [unsettledEvent, activityAppendedEvent];
+    }
+
+    case "thread.fork": {
+      const sourceThread = yield* requireThread({
+        readModel,
+        command,
+        threadId: command.sourceThreadId,
+      });
+      yield* requireThreadAbsent({
+        readModel,
+        command,
+        threadId: command.forkedThreadId,
+      });
+
+      // Slice the source transcript: everything up to and including the fork
+      // point message. A null fork point forks from the very beginning (an
+      // empty transcript — the edit-fork of a thread's first message);
+      // archive-tail forks pass the last message id so they copy everything.
+      let copiedMessages: ReadonlyArray<(typeof sourceThread.messages)[number]>;
+      if (command.forkPointMessageId) {
+        const forkPointIndex = sourceThread.messages.findIndex(
+          (entry) => entry.id === command.forkPointMessageId,
+        );
+        if (forkPointIndex === -1) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: `Fork point message '${command.forkPointMessageId}' does not exist on thread '${command.sourceThreadId}'.`,
+          });
+        }
+        copiedMessages = sourceThread.messages.slice(0, forkPointIndex + 1);
+      } else {
+        copiedMessages = [];
+      }
+
+      const createdEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.forkedThreadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.created",
+        payload: {
+          threadId: command.forkedThreadId,
+          projectId: sourceThread.projectId,
+          title: command.title,
+          modelSelection: sourceThread.modelSelection,
+          runtimeMode: sourceThread.runtimeMode,
+          interactionMode: sourceThread.interactionMode,
+          branch: null,
+          worktreePath: null,
+          forkedFromThreadId: command.sourceThreadId,
+          forkPointMessageId: command.forkPointMessageId,
+          forkKind: command.forkKind,
+          createdAt: command.createdAt,
+          updatedAt: command.createdAt,
+        },
+      };
+
+      // Copied messages keep their timestamps and turn references so the
+      // fork's timeline reads exactly like the source's up to the fork point,
+      // but each gets a FRESH id: message ids are globally unique in the
+      // projection, so reusing them would move the rows off the source thread
+      // and destroy the transcript being forked from. Chained causation
+      // mirrors turn.start's message-sent → turn-start-requested linkage.
+      const messageEvents: Array<Omit<OrchestrationEvent, "sequence">> = [];
+      let causationEventId = createdEvent.eventId;
+      for (const message of copiedMessages) {
+        const base = yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.forkedThreadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        });
+        const messageEvent: Omit<OrchestrationEvent, "sequence"> = {
+          ...base,
+          causationEventId,
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.forkedThreadId,
+            messageId: MessageId.make(base.eventId),
+            role: message.role,
+            text: message.text,
+            ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
+            turnId: message.turnId,
+            streaming: false,
+            createdAt: message.createdAt,
+            updatedAt: message.updatedAt,
+          },
+        };
+        messageEvents.push(messageEvent);
+        causationEventId = messageEvent.eventId;
+      }
+
+      // An archive-tail fork is a preserved record of discarded work, not a
+      // place the user is actively working — it lands settled.
+      const settledEvent: Omit<OrchestrationEvent, "sequence"> | null =
+        command.forkKind === "archive-tail"
+          ? {
+              ...(yield* withEventBase({
+                aggregateKind: "thread",
+                aggregateId: command.forkedThreadId,
+                occurredAt: command.createdAt,
+                commandId: command.commandId,
+              })),
+              type: "thread.settled",
+              payload: {
+                threadId: command.forkedThreadId,
+                settledAt: command.createdAt,
+                updatedAt: command.createdAt,
+              },
+            }
+          : null;
+
+      // The fork marker rides the SOURCE thread's stream so its subscribers
+      // see "this thread was forked" without subscribing to the new thread.
+      const forkedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.sourceThreadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.forked",
+        payload: {
+          threadId: command.forkedThreadId,
+          sourceThreadId: command.sourceThreadId,
+          forkPointMessageId: command.forkPointMessageId,
+          forkKind: command.forkKind,
+          updatedAt: command.createdAt,
+        },
+      };
+
+      return [createdEvent, ...messageEvents, ...(settledEvent ? [settledEvent] : []), forkedEvent];
     }
 
     default: {

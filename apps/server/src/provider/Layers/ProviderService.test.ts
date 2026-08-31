@@ -203,10 +203,19 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
       }),
   );
 
+  const forkThread = vi.fn(
+    (
+      threadId: ThreadId,
+      _input: { upToTurnId?: TurnId; cwd?: string; title?: string },
+    ): Effect.Effect<{ resumeCursor?: unknown }, ProviderAdapterError> =>
+      Effect.succeed({ resumeCursor: { threadId: `${threadId}-fork` } }),
+  );
+
   const adapter: ProviderAdapterShape<ProviderAdapterError> = {
     provider,
     capabilities: {
       sessionModelSwitch: "in-session",
+      sessionFork: "turn-granular",
     },
     startSession,
     sendTurn,
@@ -218,6 +227,7 @@ function makeFakeCodexAdapter(provider: ProviderDriverKind = CODEX_DRIVER) {
     hasSession,
     readThread,
     rollbackThread,
+    forkThread,
     stopAll,
     get streamEvents() {
       return Stream.fromPubSub(runtimeEventPubSub);
@@ -1598,6 +1608,22 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         status: "completed",
       };
 
+      const completedResumeCursor = {
+        resume: "completed-session",
+        turnCount: 1,
+        turnBoundaries: [
+          {
+            turnId: "turn-1",
+            assistantUuid: "9b2c3c95-b7d7-41ef-8ff4-f632aa01b5e9",
+          },
+        ],
+      };
+      fanout.codex.updateSession(session.threadId, (current) => ({
+        ...current,
+        status: "ready",
+        resumeCursor: completedResumeCursor,
+      }));
+
       fanout.codex.emit(completedEvent);
       yield* advanceTestClock(50);
 
@@ -1615,6 +1641,12 @@ fanout.layer("ProviderServiceLive fanout", (it) => {
         ),
         true,
       );
+      const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+      const persisted = yield* directory.getBinding(session.threadId);
+      assert.equal(Option.isSome(persisted), true);
+      if (Option.isSome(persisted)) {
+        assert.deepEqual(persisted.value.resumeCursor, completedResumeCursor);
+      }
     }),
   );
 

@@ -25,11 +25,28 @@ import type * as Stream from "effect/Stream";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
 
+/**
+ * Declares how a provider can fork an existing conversation:
+ *
+ * - `turn-granular`: the fork can slice at an arbitrary completed turn
+ *   (Codex `thread/fork` with `lastTurnId`, Claude SDK `forkSession` with
+ *   `upToMessageId`).
+ * - `full-copy`: the fork always duplicates the entire conversation; the
+ *   edited message must be re-sent as a correction (ACP `session/fork`).
+ * - `none`: provider context cannot be forked; only correction-style edits
+ *   that keep the existing context remain available.
+ */
+export type ProviderSessionForkMode = "turn-granular" | "full-copy" | "none";
+
 export interface ProviderAdapterCapabilities {
   /**
    * Declares whether changing the model on an existing session is supported.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
+  /**
+   * Declares how this provider can fork a conversation for message edits.
+   */
+  readonly sessionFork: ProviderSessionForkMode;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -40,6 +57,28 @@ export interface ProviderThreadTurnSnapshot {
 export interface ProviderThreadSnapshot {
   readonly threadId: ThreadId;
   readonly turns: ReadonlyArray<ProviderThreadTurnSnapshot>;
+}
+
+export interface ProviderThreadForkInput {
+  /**
+   * Canonical turn id of the last completed turn to include in the fork.
+   * Omit for a full copy. Ignored by full-copy providers.
+   */
+  readonly upToTurnId?: TurnId;
+  /**
+   * Working directory for the forked provider session (e.g. a git worktree).
+   */
+  readonly cwd?: string;
+  readonly title?: string;
+}
+
+export interface ProviderThreadForkResult {
+  /**
+   * Opaque resume cursor identifying the forked provider conversation. Feed
+   * to `startSession` for the forked thread so its first turn continues the
+   * forked context. Absent when the provider needs no resume state.
+   */
+  readonly resumeCursor?: unknown;
 }
 
 export interface ProviderAdapterShape<TError> {
@@ -113,6 +152,18 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Fork a provider thread into a new provider conversation.
+   *
+   * The source session is left untouched; the returned resume cursor belongs
+   * to the fork. Adapters whose `capabilities.sessionFork === "none"` fail
+   * with a validation error.
+   */
+  readonly forkThread: (
+    threadId: ThreadId,
+    input: ProviderThreadForkInput,
+  ) => Effect.Effect<ProviderThreadForkResult, TError>;
 
   /**
    * Stop all sessions owned by this adapter.

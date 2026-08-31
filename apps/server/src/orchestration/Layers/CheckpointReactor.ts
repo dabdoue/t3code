@@ -1,6 +1,6 @@
 import {
   CommandId,
-  type CheckpointRef,
+  CheckpointRef,
   EventId,
   MessageId,
   type ProjectId,
@@ -17,6 +17,8 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import type * as PlatformError from "effect/PlatformError";
+import * as Predicate from "effect/Predicate";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { isTemporaryWorktreeBranch } from "@t3tools/shared/git";
@@ -738,12 +740,16 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const targetCheckpoint =
+      event.payload.turnCount === 0
+        ? undefined
+        : thread.checkpoints.find(
+            (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
+          );
     const targetCheckpointRef =
       event.payload.turnCount === 0
         ? checkpointRefForThreadTurn(event.payload.threadId, 0)
-        : thread.checkpoints.find(
-            (checkpoint) => checkpoint.checkpointTurnCount === event.payload.turnCount,
-          )?.checkpointRef;
+        : targetCheckpoint?.checkpointRef;
 
     if (!targetCheckpointRef) {
       yield* appendRevertFailureActivity({
@@ -755,12 +761,44 @@ const make = Effect.gen(function* () {
       return;
     }
 
+    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
+    if (rolledBackTurns > 0) {
+      const instanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+      const capabilities = yield* providerService.getCapabilities(instanceId);
+      if (capabilities.sessionFork !== "turn-granular") {
+        yield* appendRevertFailureActivity({
+          threadId: event.payload.threadId,
+          turnCount: event.payload.turnCount,
+          detail: `Provider '${thread.session?.providerName ?? instanceId}' cannot reset its conversation at this checkpoint. Files and visible history were left unchanged.`,
+          createdAt: now,
+        }).pipe(Effect.catch(() => Effect.void));
+        return;
+      }
+    }
+
+    const safetyCheckpointRef =
+      rolledBackTurns > 0
+        ? CheckpointRef.make(`refs/t3/revert-safety/${event.eventId}`)
+        : undefined;
+    if (safetyCheckpointRef) {
+      yield* checkpointStore.captureCheckpoint({
+        cwd: sessionRuntime.value.cwd,
+        checkpointRef: safetyCheckpointRef,
+      });
+    }
+
     const restored = yield* checkpointStore.restoreCheckpoint({
       cwd: sessionRuntime.value.cwd,
       checkpointRef: targetCheckpointRef,
       fallbackToHead: event.payload.turnCount === 0,
     });
     if (!restored) {
+      if (safetyCheckpointRef) {
+        yield* checkpointStore.deleteCheckpointRefs({
+          cwd: sessionRuntime.value.cwd,
+          checkpointRefs: [safetyCheckpointRef],
+        });
+      }
       yield* appendRevertFailureActivity({
         threadId: event.payload.threadId,
         turnCount: event.payload.turnCount,
@@ -772,13 +810,56 @@ const make = Effect.gen(function* () {
 
     // Refresh the workspace entry index so the @-mention file picker
     // reflects the reverted filesystem state.
-    yield* workspaceEntries.refresh(sessionRuntime.value.cwd);
+    yield* workspaceEntries.refresh(sessionRuntime.value.cwd).pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("failed to refresh workspace entries during checkpoint revert", {
+          threadId: event.payload.threadId,
+          cwd: sessionRuntime.value.cwd,
+          cause: Cause.pretty(cause),
+        }),
+      ),
+    );
 
-    const rolledBackTurns = Math.max(0, currentTurnCount - event.payload.turnCount);
     if (rolledBackTurns > 0) {
-      yield* providerService.rollbackConversation({
-        threadId: sessionRuntime.value.threadId,
-        numTurns: rolledBackTurns,
+      yield* providerService
+        .resetConversation({
+          threadId: sessionRuntime.value.threadId,
+          ...(targetCheckpoint ? { upToTurnId: targetCheckpoint.turnId } : {}),
+          cwd: sessionRuntime.value.cwd,
+        })
+        .pipe(
+          Effect.onError(() =>
+            safetyCheckpointRef
+              ? checkpointStore
+                  .restoreCheckpoint({
+                    cwd: sessionRuntime.value.cwd,
+                    checkpointRef: safetyCheckpointRef,
+                  })
+                  .pipe(
+                    Effect.andThen(
+                      checkpointStore.deleteCheckpointRefs({
+                        cwd: sessionRuntime.value.cwd,
+                        checkpointRefs: [safetyCheckpointRef],
+                      }),
+                    ),
+                    Effect.andThen(workspaceEntries.refresh(sessionRuntime.value.cwd)),
+                    Effect.asVoid,
+                    Effect.catchCause((cause) =>
+                      Effect.logWarning("failed to restore checkpoint-revert safety snapshot", {
+                        threadId: event.payload.threadId,
+                        cwd: sessionRuntime.value.cwd,
+                        cause: Cause.pretty(cause),
+                      }),
+                    ),
+                  )
+              : Effect.void,
+          ),
+        );
+    }
+    if (safetyCheckpointRef) {
+      yield* checkpointStore.deleteCheckpointRefs({
+        cwd: sessionRuntime.value.cwd,
+        checkpointRefs: [safetyCheckpointRef],
       });
     }
 
@@ -911,6 +992,21 @@ const make = Effect.gen(function* () {
     );
 
   const worker = yield* makeDrainableWorker(processInputSafely);
+  const seenDomainEvents = yield* Ref.make(new Set<EventId>());
+
+  const enqueueDomainOnce = Effect.fn("CheckpointReactor.enqueueDomainOnce")(function* (
+    event: OrchestrationEvent,
+  ) {
+    const shouldEnqueue = yield* Ref.modify(seenDomainEvents, (seen) => {
+      if (seen.has(event.eventId)) return [false, seen] as const;
+      const next = new Set(seen);
+      next.add(event.eventId);
+      return [true, next] as const;
+    });
+    if (shouldEnqueue) {
+      yield* worker.enqueue({ source: "domain", event });
+    }
+  });
 
   const start: CheckpointReactorShape["start"] = Effect.fn("start")(function* () {
     yield* forkParked(
@@ -923,8 +1019,49 @@ const make = Effect.gen(function* () {
         ) {
           return Effect.void;
         }
-        return worker.enqueue({ source: "domain", event });
+        return enqueueDomainOnce(event);
       }),
+    );
+
+    // The live domain stream is hot. Recover checkpoint requests that have no
+    // later success or failure marker so a restart cannot strand restored-file
+    // work or a message-edit rewind waiting for its `thread.reverted` event.
+    const historical = yield* Stream.runCollect(
+      orchestrationEngine.readEvents(0, Number.MAX_SAFE_INTEGER),
+    ).pipe(
+      Effect.map((events) => Array.from(events)),
+      Effect.catchCause((cause) =>
+        Effect.logWarning("checkpoint-revert restart replay failed", {
+          cause: Cause.pretty(cause),
+        }).pipe(Effect.as([] as ReadonlyArray<OrchestrationEvent>)),
+      ),
+    );
+    const pendingReverts = new Map<
+      string,
+      Extract<OrchestrationEvent, { type: "thread.checkpoint-revert-requested" }>
+    >();
+    for (const event of historical) {
+      if (event.type === "thread.checkpoint-revert-requested") {
+        pendingReverts.set(`${event.payload.threadId}:${event.payload.turnCount}`, event);
+      } else if (event.type === "thread.reverted") {
+        pendingReverts.delete(`${event.payload.threadId}:${event.payload.turnCount}`);
+      } else if (
+        event.type === "thread.activity-appended" &&
+        event.payload.activity.kind === "checkpoint.revert.failed"
+      ) {
+        const activityPayload = event.payload.activity.payload;
+        const turnCount = Predicate.isObject(activityPayload)
+          ? activityPayload.turnCount
+          : undefined;
+        if (typeof turnCount === "number") {
+          pendingReverts.delete(`${event.payload.threadId}:${turnCount}`);
+        }
+      }
+    }
+    yield* Effect.forEach(
+      Array.from(pendingReverts.values()).toSorted((left, right) => left.sequence - right.sequence),
+      enqueueDomainOnce,
+      { discard: true },
     );
 
     yield* forkParked(

@@ -23,6 +23,7 @@ import type {
   ProviderStopSessionInput,
   ThreadId,
   ProviderTurnStartResult,
+  TurnId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
@@ -103,6 +104,32 @@ export interface ProviderServiceShape {
   readonly rollbackConversation: (input: {
     readonly threadId: ThreadId;
     readonly numTurns: number;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Replace a thread's provider conversation with a turn-granular fork ending
+   * at `upToTurnId`. Omitting the boundary resets to a fresh conversation.
+   * The old live session is stopped and the replacement cursor is persisted;
+   * the next turn start resumes the replacement conversation.
+   */
+  readonly resetConversation: (input: {
+    readonly threadId: ThreadId;
+    readonly upToTurnId?: TurnId;
+    readonly cwd?: string;
+  }) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Fork a provider conversation into a new one bound to `forkedThreadId`.
+   *
+   * The source thread's session is left untouched. The forked thread receives
+   * a persisted session binding carrying the fork's resume cursor, so its
+   * first turn start resumes the forked provider conversation.
+   */
+  readonly forkConversation: (input: {
+    readonly threadId: ThreadId;
+    readonly forkedThreadId: ThreadId;
+    readonly upToTurnId?: TurnId;
+    readonly cwd?: string;
   }) => Effect.Effect<void, ProviderServiceError>;
 
   /**

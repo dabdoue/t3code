@@ -10,7 +10,7 @@ import {
   ProviderDriverKind,
   type ToolLifecycleItemType,
   type UserInputQuestion,
-  type ThreadId,
+  ThreadId,
   type TurnId,
 } from "@t3tools/contracts";
 
@@ -94,6 +94,12 @@ export interface WorkLogEntry {
     workflowId: string | null;
     agentTaskIds: ReadonlyArray<string>;
   };
+  /**
+   * The thread a message-edit produced: the new fork on `thread.forked` rows,
+   * or the settled archive of discarded turns on `thread.tail-archived` rows.
+   * The row renders as a call-to-action navigating to it.
+   */
+  linkedThreadId?: ThreadId;
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -899,6 +905,17 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   }
   if (isTaskActivity && payload && isBackgroundTaskActivity(payload)) {
     entry.isBackgroundTask = true;
+  }
+  // Message-edit rows point at the thread the edit produced: the fork itself,
+  // or the archive holding the turns a rewind discarded.
+  const linkedThreadId =
+    activity.kind === "thread.forked"
+      ? payload?.forkThreadId
+      : activity.kind === "thread.tail-archived"
+        ? payload?.archiveThreadId
+        : undefined;
+  if (typeof linkedThreadId === "string" && linkedThreadId.length > 0) {
+    entry.linkedThreadId = ThreadId.make(linkedThreadId);
   }
   const collapseKey = deriveToolLifecycleCollapseKey(entry);
   if (collapseKey) {

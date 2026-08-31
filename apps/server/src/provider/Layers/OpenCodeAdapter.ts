@@ -1682,6 +1682,16 @@ export function makeOpenCodeAdapter(
       },
     );
 
+    const forkThread: OpenCodeAdapterShape["forkThread"] = (threadId) =>
+      Effect.gen(function* () {
+        yield* ensureSessionContext(sessions, threadId);
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "thread/fork",
+          detail: "OpenCode sessions do not support provider-side forking yet.",
+        });
+      });
+
     const stopAll: OpenCodeAdapterShape["stopAll"] = () =>
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
@@ -1701,6 +1711,7 @@ export function makeOpenCodeAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        sessionFork: "none",
       },
       startSession,
       sendTurn,
@@ -1712,6 +1723,7 @@ export function makeOpenCodeAdapter(
       hasSession,
       readThread,
       rollbackThread,
+      forkThread,
       stopAll,
       get streamEvents() {
         return Stream.fromQueue(runtimeEvents);

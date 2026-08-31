@@ -270,6 +270,10 @@ export class GitVcsDriver extends Context.Service<
     readonly createRef: (
       input: VcsCreateRefInput,
     ) => Effect.Effect<VcsCreateRefResult, GitCommandError>;
+    readonly deleteRef: (input: {
+      readonly cwd: string;
+      readonly refName: string;
+    }) => Effect.Effect<void, GitCommandError>;
     readonly switchRef: (
       input: VcsSwitchRefInput,
     ) => Effect.Effect<VcsSwitchRefResult, GitCommandError>;
@@ -718,7 +722,11 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
         const commitTreeResult = yield* execute({
           operation,
           cwd: input.cwd,
-          args: ["commit-tree", treeOid, "-m", message],
+          // The parent never moves a user branch: the checkpoint still lives
+          // only on refs/t3/checkpoints. It records the real ancestry so a
+          // fork can branch from that commit and restore this snapshot as
+          // working-tree changes instead of creating an unrelated root.
+          args: ["commit-tree", treeOid, ...(headExists ? ["-p", "HEAD"] : []), "-m", message],
           env: commitEnv,
         });
         const commitOid = commitTreeResult.stdout.trim();
@@ -744,6 +752,39 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       resolveCheckpointCommit(input.cwd, input.checkpointRef).pipe(
         Effect.map((commit) => commit !== null),
       ),
+
+    resolveCheckpointBaseCommit: Effect.fn("GitVcsDriver.checkpoints.resolveCheckpointBaseCommit")(
+      function* (input) {
+        const checkpointCommit = yield* resolveCheckpointCommit(input.cwd, input.checkpointRef);
+        if (!checkpointCommit) {
+          return null;
+        }
+        const parent = yield* execute({
+          operation: "GitVcsDriver.checkpoints.resolveCheckpointBaseCommit",
+          cwd: input.cwd,
+          args: ["rev-parse", `${checkpointCommit}^`],
+          allowNonZeroExit: true,
+        });
+        if (parent.exitCode !== 0) {
+          return null;
+        }
+        const commit = parent.stdout.trim();
+        return commit.length > 0 ? commit : null;
+      },
+    ),
+
+    copyCheckpointRef: Effect.fn("GitVcsDriver.checkpoints.copyCheckpointRef")(function* (input) {
+      const commit = yield* resolveCheckpointCommit(input.cwd, input.fromCheckpointRef);
+      if (!commit) {
+        return false;
+      }
+      yield* execute({
+        operation: "GitVcsDriver.checkpoints.copyCheckpointRef",
+        cwd: input.cwd,
+        args: ["update-ref", input.toCheckpointRef, commit],
+      });
+      return true;
+    }),
 
     restoreCheckpoint: Effect.fn("GitVcsDriver.checkpoints.restoreCheckpoint")(function* (input) {
       const operation = "GitVcsDriver.checkpoints.restoreCheckpoint";

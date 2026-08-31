@@ -8,6 +8,8 @@
  */
 import {
   type CanUseTool,
+  forkSession,
+  getSessionMessages,
   query,
   type Options as ClaudeQueryOptions,
   type PermissionMode,
@@ -125,6 +127,10 @@ interface ClaudeResumeState {
   readonly resume?: string;
   readonly resumeSessionAt?: string;
   readonly turnCount?: number;
+  readonly turnBoundaries?: ReadonlyArray<{
+    readonly turnId: TurnId;
+    readonly assistantUuid: string;
+  }>;
 }
 
 interface ClaudeTurnState {
@@ -226,6 +232,7 @@ interface ClaudeSessionContext {
     id: TurnId;
     items: Array<unknown>;
   }>;
+  completedTurnCount: number;
   readonly inFlightTools: Map<number, ToolInFlight>;
   readonly claudeTasks: Map<string, ClaudeTaskState>;
   readonly taskAgents: Map<string, ClaudeTaskAgentState>;
@@ -244,6 +251,12 @@ interface ClaudeSessionContext {
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
   lastAssistantUuid: string | undefined;
+  /**
+   * Last SDK assistant message UUID per completed turn. Fork slicing needs a
+   * transcript UUID for an arbitrary turn boundary; this map extends the
+   * `lastAssistantUuid` tracking to every finished turn.
+   */
+  readonly turnLastAssistantUuid: Map<TurnId, string>;
   lastThreadStartedId: string | undefined;
   stopped: boolean;
 }
@@ -633,6 +646,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     sessionId?: unknown;
     resumeSessionAt?: unknown;
     turnCount?: unknown;
+    turnBoundaries?: unknown;
   };
 
   const threadIdCandidate = typeof cursor.threadId === "string" ? cursor.threadId : undefined;
@@ -650,6 +664,22 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
   const resumeSessionAt =
     typeof cursor.resumeSessionAt === "string" ? cursor.resumeSessionAt : undefined;
   const turnCountValue = typeof cursor.turnCount === "number" ? cursor.turnCount : undefined;
+  const turnBoundaries = Array.isArray(cursor.turnBoundaries)
+    ? cursor.turnBoundaries.flatMap((entry) => {
+        if (typeof entry !== "object" || entry === null) return [];
+        const candidate = entry as { turnId?: unknown; assistantUuid?: unknown };
+        return typeof candidate.turnId === "string" &&
+          typeof candidate.assistantUuid === "string" &&
+          isUuid(candidate.assistantUuid)
+          ? [
+              {
+                turnId: TurnId.make(candidate.turnId),
+                assistantUuid: candidate.assistantUuid,
+              },
+            ]
+          : [];
+      })
+    : undefined;
 
   return {
     ...(threadId ? { threadId } : {}),
@@ -658,6 +688,7 @@ function readClaudeResumeState(resumeCursor: unknown): ClaudeResumeState | undef
     ...(turnCountValue !== undefined && Number.isInteger(turnCountValue) && turnCountValue >= 0
       ? { turnCount: turnCountValue }
       : {}),
+    ...(turnBoundaries && turnBoundaries.length > 0 ? { turnBoundaries } : {}),
   };
 }
 
@@ -1753,7 +1784,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId,
       ...(context.resumeSessionId ? { resume: context.resumeSessionId } : {}),
       ...(context.lastAssistantUuid ? { resumeSessionAt: context.lastAssistantUuid } : {}),
-      turnCount: context.turns.length,
+      turnCount: context.completedTurnCount,
+      turnBoundaries: Array.from(context.turnLastAssistantUuid, ([turnId, assistantUuid]) => ({
+        turnId,
+        assistantUuid,
+      })),
     };
 
     context.session = {
@@ -2326,11 +2361,20 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       id: turnState.turnId,
       items: [...turnState.items],
     });
+    context.completedTurnCount += 1;
+    if (context.lastAssistantUuid) {
+      context.turnLastAssistantUuid.set(turnState.turnId, context.lastAssistantUuid);
+    }
 
     yield* emitThreadTokenUsage(context, usageSnapshot, {
       rawMethod: "claude/result",
       rawPayload: result ?? { status },
     });
+
+    // Runtime consumers persist the adapter session when they observe the
+    // terminal event. Publish only after the durable cursor includes this
+    // turn's boundary so restart-time forks can still slice at it.
+    yield* updateResumeCursor(context);
 
     const stamp = yield* makeEventStamp();
     yield* offerRuntimeEvent({
@@ -4202,6 +4246,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           ...(sessionId ? { resume: sessionId } : {}),
           ...(resumeState?.resumeSessionAt ? { resumeSessionAt: resumeState.resumeSessionAt } : {}),
           turnCount: resumeState?.turnCount ?? 0,
+          ...(resumeState?.turnBoundaries
+            ? {
+                turnBoundaries: resumeState.turnBoundaries.map(({ turnId, assistantUuid }) => ({
+                  turnId,
+                  assistantUuid,
+                })),
+              }
+            : {}),
         },
         createdAt: startedAt,
         updatedAt: startedAt,
@@ -4220,6 +4272,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         pendingApprovals,
         pendingUserInputs,
         turns: [],
+        completedTurnCount: resumeState?.turnCount ?? 0,
         inFlightTools,
         claudeTasks,
         taskAgents,
@@ -4230,6 +4283,12 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
         lastAssistantUuid: resumeState?.resumeSessionAt,
+        turnLastAssistantUuid: new Map(
+          (resumeState?.turnBoundaries ?? []).map(({ turnId, assistantUuid }) => [
+            turnId,
+            assistantUuid,
+          ]),
+        ),
         lastThreadStartedId: undefined,
         stopped: false,
       };
@@ -4501,8 +4560,103 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const context = yield* requireSession(threadId);
       const nextLength = Math.max(0, context.turns.length - numTurns);
       context.turns.splice(nextLength);
+      const boundaries = Array.from(context.turnLastAssistantUuid.keys());
+      for (const turnId of boundaries.slice(Math.max(0, boundaries.length - numTurns))) {
+        context.turnLastAssistantUuid.delete(turnId);
+      }
+      context.completedTurnCount = Math.max(0, context.completedTurnCount - numTurns);
+      context.lastAssistantUuid = Array.from(context.turnLastAssistantUuid.values()).at(-1);
       yield* updateResumeCursor(context);
       return yield* snapshotThread(context);
+    },
+  );
+
+  const forkThread: ClaudeAdapterShape["forkThread"] = Effect.fn("forkThread")(
+    function* (threadId, input) {
+      const context = yield* requireSession(threadId);
+      const sessionId = context.resumeSessionId;
+      if (!sessionId || !isUuid(sessionId)) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "forkThread",
+          issue: `Thread '${threadId}' has no durable Claude session to fork.`,
+        });
+      }
+
+      let upToMessageId: string | undefined;
+      const boundaries = Array.from(context.turnLastAssistantUuid.entries());
+      let retainedBoundaries = boundaries;
+      let turnCount = context.completedTurnCount;
+      if (input.upToTurnId !== undefined) {
+        const boundaryUuid = context.turnLastAssistantUuid.get(input.upToTurnId);
+        if (!boundaryUuid) {
+          return yield* new ProviderAdapterValidationError({
+            provider: PROVIDER,
+            operation: "forkThread",
+            issue: `No transcript boundary recorded for turn '${input.upToTurnId}'; cannot slice the fork.`,
+          });
+        }
+        upToMessageId = boundaryUuid;
+        const boundaryIndex = boundaries.findIndex(([turnId]) => turnId === input.upToTurnId);
+        retainedBoundaries = boundaries.slice(0, boundaryIndex + 1);
+        turnCount = boundaryIndex + 1;
+      }
+
+      const forked = yield* Effect.tryPromise({
+        try: () =>
+          forkSession(sessionId, {
+            ...(upToMessageId ? { upToMessageId } : {}),
+            ...(input.title ? { title: input.title } : {}),
+          }),
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId,
+            detail: "Failed to fork the Claude session.",
+            cause,
+          }),
+      });
+
+      const remappedBoundaries = yield* Effect.tryPromise({
+        try: async () => {
+          const [sourceMessages, forkedMessages] = await Promise.all([
+            getSessionMessages(sessionId),
+            getSessionMessages(forked.sessionId),
+          ]);
+          if (sourceMessages.length !== forkedMessages.length && upToMessageId === undefined) {
+            throw new Error("Forked Claude transcript length did not match its source.");
+          }
+          return retainedBoundaries.map(([turnId, sourceUuid]) => {
+            const sourceIndex = sourceMessages.findIndex((message) => message.uuid === sourceUuid);
+            const forkedMessage = sourceIndex >= 0 ? forkedMessages[sourceIndex] : undefined;
+            if (!forkedMessage || forkedMessage.type !== sourceMessages[sourceIndex]?.type) {
+              throw new Error(`Could not remap Claude transcript boundary for turn '${turnId}'.`);
+            }
+            return [turnId, forkedMessage.uuid] as const;
+          });
+        },
+        catch: (cause) =>
+          new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId,
+            detail: "Forked the Claude session but could not recover its turn boundaries.",
+            cause,
+          }),
+      });
+      const forkedLastAssistantUuid = remappedBoundaries.at(-1)?.[1];
+
+      return {
+        resumeCursor: {
+          threadId,
+          resume: forked.sessionId,
+          ...(forkedLastAssistantUuid ? { resumeSessionAt: forkedLastAssistantUuid } : {}),
+          turnCount,
+          turnBoundaries: remappedBoundaries.map(([turnId, assistantUuid]) => ({
+            turnId,
+            assistantUuid,
+          })),
+        },
+      };
     },
   );
 
@@ -4589,12 +4743,14 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     provider: PROVIDER,
     capabilities: {
       sessionModelSwitch: "in-session",
+      sessionFork: "turn-granular",
     },
     startSession,
     sendTurn,
     interruptTurn,
     readThread,
     rollbackThread,
+    forkThread,
     respondToRequest,
     respondToUserInput,
     stopSession,

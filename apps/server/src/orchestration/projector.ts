@@ -297,6 +297,13 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            ...(payload.forkedFromThreadId !== undefined
+              ? { forkedFromThreadId: payload.forkedFromThreadId }
+              : {}),
+            ...(payload.forkPointMessageId !== undefined
+              ? { forkPointMessageId: payload.forkPointMessageId }
+              : {}),
+            ...(payload.forkKind !== undefined ? { forkKind: payload.forkKind } : {}),
             latestTurn: null,
             createdAt: payload.createdAt,
             updatedAt: payload.updatedAt,

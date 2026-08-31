@@ -12,6 +12,10 @@ import {
   requestOlderThreadTurns,
   threadHasOlderTurns,
 } from "@t3tools/client-runtime/state/threads";
+import {
+  isAtomCommandInterrupted,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { projectScriptCwd, projectScriptRuntimeEnv } from "@t3tools/shared/projectScripts";
 import { Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -215,6 +219,9 @@ function ThreadRouteContent(
   const gitActions = useSelectedThreadGitActions();
   const requests = useSelectedThreadRequests();
   const interruptThreadTurn = useAtomCommand(threadEnvironment.interruptTurn, "thread interrupt");
+  const editThreadMessage = useAtomCommand(threadEnvironment.editMessage, {
+    reportFailure: false,
+  });
   const navigation = useNavigation();
   const params = props.route.params;
   const environmentIdRaw = firstRouteParam(params.environmentId);
@@ -333,6 +340,31 @@ function ThreadRouteContent(
     }
     onReconnectEnvironment(environmentId);
   }, [environmentId, onReconnectEnvironment]);
+  const handleEditUserMessage = useCallback(
+    async (input: {
+      readonly messageId: import("@t3tools/contracts").MessageId;
+      readonly text: string;
+      readonly resolution: import("@t3tools/contracts").ThreadMessageEditResolution;
+    }) => {
+      if (!selectedThread) {
+        throw new Error("Thread unavailable.");
+      }
+      const result = await editThreadMessage({
+        environmentId: selectedThread.environmentId,
+        input: {
+          threadId: selectedThread.id,
+          messageId: input.messageId,
+          text: input.text,
+          resolution: input.resolution,
+        },
+      });
+      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        const error = squashAtomCommandFailure(result);
+        throw error instanceof Error ? error : new Error("The message could not be edited.");
+      }
+    },
+    [editThreadMessage, selectedThread],
+  );
 
   /* ─── Git action progress (for overlay banner) ──────────────────── */
   const gitActionProgressTarget = useMemo(
@@ -811,6 +843,7 @@ function ThreadRouteContent(
           onStopThread={handleStopThread}
           onSetQueuedAutoSend={composer.onSetQueuedAutoSend}
           onSendMessage={composer.onSendMessage}
+          onEditUserMessage={handleEditUserMessage}
           onReconnectEnvironment={handleReconnectEnvironment}
           onUpdateThreadModelSelection={composer.onUpdateModelSelection}
           onUpdateThreadRuntimeMode={composer.onUpdateRuntimeMode}
