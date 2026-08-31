@@ -30,10 +30,44 @@ import {
   resolveThreadMetadataUpdateForNextTurn,
   resolveSendEnvMode,
   scheduleEnvironmentReconnectWarning,
+  selectComposerAttachmentFiles,
   startNewThreadForProject,
   shouldShowBranchMismatchBanner,
   shouldWriteThreadErrorToCurrentServerThread,
 } from "./ChatView.logic";
+
+describe("selectComposerAttachmentFiles", () => {
+  const file = (name: string, type: string, size: number) => ({ name, type, size }) as File;
+
+  it("accepts arbitrary non-image file types", () => {
+    const archive = file("results.tar.zst", "application/zstd", 4_096);
+    const unknown = file("instrument-output.custom", "", 512);
+
+    expect(selectComposerAttachmentFiles([archive, unknown], 0)).toEqual({
+      acceptedFiles: [archive, unknown],
+      error: null,
+    });
+  });
+
+  it("rejects empty and oversized non-image files while reserving image compression", () => {
+    const empty = file("empty.csv", "text/csv", 0);
+    const oversizedFile = file("large.bin", "application/octet-stream", 10 * 1024 * 1024 + 1);
+    const oversizedImage = file("large.png", "image/png", 10 * 1024 * 1024 + 1);
+
+    expect(selectComposerAttachmentFiles([empty, oversizedFile, oversizedImage], 0)).toEqual({
+      acceptedFiles: [oversizedImage],
+      error: "'large.bin' exceeds the 10 MB attachment limit.",
+    });
+  });
+
+  it("enforces the shared attachment count across images and files", () => {
+    const ninth = file("ninth.pdf", "application/pdf", 128);
+    expect(selectComposerAttachmentFiles([ninth], 8)).toEqual({
+      acceptedFiles: [],
+      error: "You can attach up to 8 files per message.",
+    });
+  });
+});
 
 describe("queued message editing", () => {
   const message1 = MessageId.make("message-1");

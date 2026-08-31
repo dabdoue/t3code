@@ -33,7 +33,12 @@ import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model"
 import { useMemo } from "react";
 import { getLocalStorageItem } from "./hooks/useLocalStorage";
 import { resolveAppModelSelection, resolveAppModelSelectionForInstance } from "./modelSelection";
-import { DEFAULT_INTERACTION_MODE, DEFAULT_RUNTIME_MODE, type ChatImageAttachment } from "./types";
+import {
+  DEFAULT_INTERACTION_MODE,
+  DEFAULT_RUNTIME_MODE,
+  type ChatFileAttachment,
+  type ChatImageAttachment,
+} from "./types";
 import {
   type TerminalContextDraft,
   ensureInlineTerminalContextPlaceholders,
@@ -79,6 +84,7 @@ if (typeof window !== "undefined" && typeof window.addEventListener === "functio
 }
 
 export const PersistedComposerImageAttachment = Schema.Struct({
+  type: Schema.optional(Schema.Literals(["image", "file"])),
   id: Schema.String,
   name: Schema.String,
   mimeType: Schema.String,
@@ -87,10 +93,9 @@ export const PersistedComposerImageAttachment = Schema.Struct({
 });
 export type PersistedComposerImageAttachment = typeof PersistedComposerImageAttachment.Type;
 
-export interface ComposerImageAttachment extends Omit<ChatImageAttachment, "previewUrl"> {
-  previewUrl: string;
-  file: File;
-}
+export type ComposerImageAttachment =
+  | (Omit<ChatImageAttachment, "previewUrl"> & { previewUrl: string; file: File })
+  | (Omit<ChatFileAttachment, "previewUrl"> & { previewUrl: string; file: File });
 
 const PersistedTerminalContextDraft = Schema.Struct({
   id: Schema.String,
@@ -535,9 +540,9 @@ interface ComposerDraftStoreState {
     snapshot: ComposerDraftContentSnapshot,
   ) => void;
   /**
-   * Clears only the prompt text and image attachments, preserving terminal /
+   * Clears only the prompt text and file attachments, preserving terminal /
    * element contexts, preview annotations, and review comments. Used by the
-   * prompt stash, which can only round-trip text + images: clearing the
+   * prompt stash, which can only round-trip text + attachments: clearing the
    * session-bound contexts would destroy state nothing can restore.
    */
   clearComposerPromptAndImages: (threadRef: ComposerThreadTarget) => void;
@@ -1102,6 +1107,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
   const mimeType = candidate.mimeType;
   const sizeBytes = candidate.sizeBytes;
   const dataUrl = candidate.dataUrl;
+  const type = candidate.type === "file" ? "file" : "image";
   if (
     typeof id !== "string" ||
     typeof name !== "string" ||
@@ -1115,6 +1121,7 @@ function normalizePersistedAttachment(value: unknown): PersistedComposerImageAtt
     return null;
   }
   return {
+    type,
     id,
     name,
     mimeType,
@@ -2175,7 +2182,7 @@ export function hydrateImagesFromPersisted(
 
     return [
       {
-        type: "image" as const,
+        type: attachment.type ?? "image",
         id: attachment.id,
         name: attachment.name,
         mimeType: attachment.mimeType,

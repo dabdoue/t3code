@@ -18,7 +18,8 @@ export const MAX_STASH_ENTRIES = 20;
 /**
  * Budget for an entry's serialized attachment payload. localStorage is a
  * ~5MB origin-wide quota shared with the composer draft store, so oversized
- * images are dropped (tracked in `droppedImageNames`) rather than persisted.
+ * attachments are dropped (tracked in the legacy `droppedImageNames` field)
+ * rather than persisted.
  *
  * Sized to hold two images at the per-image compression budget
  * (`MAX_STASH_IMAGE_DATA_URL_CHARS`) so a typical before/after screenshot
@@ -28,7 +29,7 @@ export const MAX_STASH_ENTRY_ATTACHMENT_CHARS = 2_700_000;
 
 /**
  * A stashed prompt carries only what every provider can accept: text and
- * image attachments. Deliberately no provider instance or model selection —
+ * file attachments. Deliberately no provider instance or model selection —
  * the point of stashing is to move a prompt into a different thread or
  * provider, so restoring must never drag the old model choice along.
  */

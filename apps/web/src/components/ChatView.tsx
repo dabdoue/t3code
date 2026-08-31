@@ -341,8 +341,8 @@ import {
 } from "../versionSkew";
 import { useAssetUrls } from "../assets/assetUrls";
 
-const IMAGE_ONLY_BOOTSTRAP_PROMPT =
-  "[User attached one or more images without additional text. Respond using the conversation context and the attached image(s).]";
+const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
+  "[User attached one or more files without additional text. Respond using the conversation context and the attachment(s).]";
 const EMPTY_ACTIVITIES: OrchestrationThreadActivity[] = [];
 const EMPTY_PROVIDERS: ServerProvider[] = [];
 const EMPTY_PROVIDER_SKILLS: ServerProvider["skills"] = [];
@@ -5029,7 +5029,7 @@ function ChatViewContent(props: ChatViewProps) {
         model: ctxSelectedModel,
         models: ctxSelectedProviderModels,
         effort: ctxSelectedPromptEffort,
-        text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+        text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
       });
       promptRef.current = "";
       clearComposerDraftContent(composerDraftTarget);
@@ -5037,7 +5037,7 @@ function ChatViewContent(props: ChatViewProps) {
       const attachmentsResult = await settlePromise(() =>
         Promise.all(
           composerImagesSnapshot.map(async (image) => ({
-            type: "image" as const,
+            type: image.type,
             name: image.name,
             mimeType: image.mimeType,
             sizeBytes: image.sizeBytes,
@@ -5181,11 +5181,11 @@ function ChatViewContent(props: ChatViewProps) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || IMAGE_ONLY_BOOTSTRAP_PROMPT,
+      text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
     const turnAttachmentsPromise = Promise.all(
       composerImagesSnapshot.map(async (image) => ({
-        type: "image" as const,
+        type: image.type,
         name: image.name,
         mimeType: image.mimeType,
         sizeBytes: image.sizeBytes,
@@ -5193,7 +5193,7 @@ function ChatViewContent(props: ChatViewProps) {
       })),
     );
     const optimisticAttachments = composerImagesSnapshot.map((image) => ({
-      type: "image" as const,
+      type: image.type,
       id: image.id,
       name: image.name,
       mimeType: image.mimeType,
@@ -5262,17 +5262,17 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     }
-    let firstComposerImageName: string | null = null;
+    let firstComposerAttachmentName: string | null = null;
     if (composerImagesSnapshot.length > 0) {
-      const firstComposerImage = composerImagesSnapshot[0];
-      if (firstComposerImage) {
-        firstComposerImageName = firstComposerImage.name;
+      const firstComposerAttachment = composerImagesSnapshot[0];
+      if (firstComposerAttachment) {
+        firstComposerAttachmentName = firstComposerAttachment.name;
       }
     }
     let titleSeed = trimmed;
     if (!titleSeed) {
-      if (firstComposerImageName) {
-        titleSeed = `Image: ${firstComposerImageName}`;
+      if (firstComposerAttachmentName) {
+        titleSeed = `Attachment: ${firstComposerAttachmentName}`;
       } else if (composerTerminalContextsSnapshot.length > 0) {
         titleSeed = formatTerminalContextLabel(composerTerminalContextsSnapshot[0]!);
       } else if (composerElementContextsSnapshot.length > 0) {
