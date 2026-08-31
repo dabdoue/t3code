@@ -1090,6 +1090,81 @@ cursorAdapterTestLayer("CursorAdapterLive", (it) => {
     }),
   );
 
+  it.effect("maps cursor/task notifications onto Agents-surface task.* events", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CursorAdapter;
+      const serverSettings = yield* ServerSettingsService;
+      const threadId = ThreadId.make("cursor-task-subagent");
+      const runtimeEvents: Array<ProviderRuntimeEvent> = [];
+      const taskCompleted = yield* Deferred.make<void>();
+
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockAgentWrapper({ T3_ACP_EMIT_CURSOR_TASK: "1" }),
+      );
+      yield* serverSettings.updateSettings({ providers: { cursor: { binaryPath: wrapperPath } } });
+
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.gen(function* () {
+          runtimeEvents.push(event);
+          if (String(event.threadId) === String(threadId) && event.type === "task.completed") {
+            yield* Deferred.succeed(taskCompleted, undefined).pipe(Effect.orDie);
+          }
+        }),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("cursor"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+        modelSelection: { instanceId: ProviderInstanceId.make("cursor"), model: "default" },
+      });
+
+      const turn = yield* adapter.sendTurn({
+        threadId,
+        input: "spawn a subagent",
+        attachments: [],
+      });
+      yield* Deferred.await(taskCompleted);
+
+      const turnEvents = runtimeEvents.filter(
+        (event) =>
+          String(event.threadId) === String(threadId) &&
+          String(event.turnId) === String(turn.turnId),
+      );
+      const started = turnEvents.filter((event) => event.type === "task.started");
+      const completed = turnEvents.filter((event) => event.type === "task.completed");
+      assert.equal(started.length, 2);
+      assert.equal(completed.length, 1);
+
+      const firstStarted = started[0];
+      assert.isDefined(firstStarted);
+      if (firstStarted?.type === "task.started") {
+        assert.equal(String(firstStarted.payload.taskId), "cursor-task-tool-call-1");
+        assert.equal(firstStarted.payload.title, "Explore codebase");
+        assert.equal(firstStarted.payload.role, "explore");
+        assert.equal(firstStarted.payload.model, "composer-2");
+        assert.equal(firstStarted.payload.toolUseId, "cursor-task-tool-call-1");
+        assert.equal(firstStarted.payload.timelineBypass, true);
+        assert.equal(firstStarted.payload.taskType, undefined);
+        assert.equal(firstStarted.payload.agentId, undefined);
+      }
+
+      const finished = completed[0];
+      assert.isDefined(finished);
+      if (finished?.type === "task.completed") {
+        assert.equal(String(finished.payload.taskId), "cursor-task-tool-call-1");
+        assert.equal(finished.payload.status, "completed");
+        assert.equal(finished.payload.title, "Explore codebase");
+        assert.equal(finished.payload.role, "explore");
+        assert.equal(finished.payload.timelineBypass, true);
+        assert.equal(finished.payload.typedUsage?.durationMs, 1840);
+      }
+
+      yield* adapter.stopSession(threadId);
+    }),
+  );
+
   it.effect("stopping a session settles pending user-input waits", () =>
     Effect.gen(function* () {
       const adapter = yield* CursorAdapter;

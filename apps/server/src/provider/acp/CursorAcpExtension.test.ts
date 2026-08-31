@@ -2,6 +2,11 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   CursorListAvailableModelsResponse,
+  CursorTaskRequest,
+  cursorTaskDurationMs,
+  cursorTaskId,
+  cursorTaskRole,
+  cursorTaskTitle,
   extractAskQuestions,
   extractPlanMarkdown,
   extractTodosAsPlan,
@@ -150,5 +155,45 @@ describe("CursorAcpExtension", () => {
     });
 
     expect(decoded.models[0]?.configOptions?.[0]?.id).toBe("reasoning");
+  });
+
+  it("maps cursor/task identity onto Agents-surface fields without a background taskType", () => {
+    const spawned = CursorTaskRequest.make({
+      toolCallId: "call_126",
+      description: "Explore codebase",
+      prompt: "Find auth handlers",
+      subagentType: "explore",
+      model: "composer-2",
+    });
+    expect(cursorTaskId(spawned)).toBe("call_126");
+    expect(cursorTaskTitle(spawned)).toBe("Explore codebase");
+    expect(cursorTaskRole(spawned.subagentType)).toBe("explore");
+    expect(cursorTaskDurationMs(spawned)).toBeUndefined();
+
+    const completed = CursorTaskRequest.make({
+      ...spawned,
+      agentId: "cursor-agent-1",
+      durationMs: 1840.4,
+    });
+    expect(cursorTaskId(completed)).toBe("call_126");
+    expect(cursorTaskDurationMs(completed)).toBe(1840);
+  });
+
+  it("keeps Cursor shell subagents as a role, not the shared shell background taskType", () => {
+    expect(cursorTaskRole("shell")).toBe("shell");
+    expect(cursorTaskRole("unspecified")).toBeUndefined();
+    expect(cursorTaskRole({ custom: "code-reviewer" })).toBe("code-reviewer");
+    expect(cursorTaskRole({ custom: "  " })).toBeUndefined();
+  });
+
+  it("falls back to prompt or Subagent when cursor/task has no description", () => {
+    expect(
+      cursorTaskTitle({
+        toolCallId: "call_empty",
+        prompt: "Review the diff",
+        subagentType: "explore",
+      }),
+    ).toBe("Review the diff");
+    expect(cursorTaskTitle({ toolCallId: "call_empty" })).toBe("Subagent");
   });
 });

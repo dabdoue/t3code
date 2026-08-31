@@ -18,6 +18,7 @@ const emitInterleavedAssistantToolCalls =
   process.env.T3_ACP_EMIT_INTERLEAVED_ASSISTANT_TOOL_CALLS === "1";
 const emitGenericToolPlaceholders = process.env.T3_ACP_EMIT_GENERIC_TOOL_PLACEHOLDERS === "1";
 const emitAskQuestion = process.env.T3_ACP_EMIT_ASK_QUESTION === "1";
+const emitCursorTask = process.env.T3_ACP_EMIT_CURSOR_TASK === "1";
 const emitXAiAskUserQuestion = process.env.T3_ACP_EMIT_XAI_ASK_USER_QUESTION === "1";
 const emitXAiPromptCompleteThenHang = process.env.T3_ACP_EMIT_XAI_PROMPT_COMPLETE_THEN_HANG === "1";
 const emitForeignSessionUpdates = process.env.T3_ACP_EMIT_FOREIGN_SESSION_UPDATES === "1";
@@ -749,6 +750,27 @@ const program = Effect.gen(function* () {
               content: "package.json\n",
             },
           },
+        });
+
+        return { stopReason: "end_turn" };
+      }
+
+      if (emitCursorTask) {
+        yield* agent.client.extNotification("cursor/task", {
+          toolCallId: "cursor-task-tool-call-1",
+          description: "Explore codebase",
+          prompt: "Find where authentication is handled and report the file paths.",
+          subagentType: "explore",
+          model: "composer-2",
+        });
+        yield* agent.client.extNotification("cursor/task", {
+          toolCallId: "cursor-task-tool-call-1",
+          description: "Explore codebase",
+          prompt: "Find where authentication is handled and report the file paths.",
+          subagentType: "explore",
+          model: "composer-2",
+          agentId: "cursor-agent-1",
+          durationMs: 1840,
         });
 
         return { stopReason: "end_turn" };
