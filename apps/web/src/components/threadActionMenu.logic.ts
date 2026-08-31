@@ -12,6 +12,7 @@ export type ThreadActionMenuId =
   | "unpin"
   | "settle"
   | "unsettle"
+  | "mark-interrupted"
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
@@ -29,6 +30,8 @@ export interface ThreadActionMenuState {
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
   readonly isRegeneratingTitle: boolean;
+  /** A session is projected that is not already stopped — something to interrupt. */
+  readonly hasInterruptibleSession: boolean;
   readonly supports: {
     readonly settlement: boolean;
     readonly snooze: boolean;
@@ -71,6 +74,13 @@ export function buildThreadActionMenuItems(
             ? { id: "unsettle" as const, label: "Un-settle thread" }
             : { id: "settle" as const, label: "Settle thread" },
         ]
+      : []),
+    // The stuck-state failsafe: declares the thread interrupted (stops the
+    // session, settles the running turn, clears any dead approval / input
+    // request) so the composer unblocks and the next message continues from
+    // where the conversation left off.
+    ...(state.hasInterruptibleSession
+      ? [{ id: "mark-interrupted" as const, label: "Mark thread interrupted" }]
       : []),
     ...(state.supports.snooze
       ? [

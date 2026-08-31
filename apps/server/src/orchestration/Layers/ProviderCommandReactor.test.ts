@@ -2955,6 +2955,83 @@ describe("ProviderCommandReactor", () => {
     expect(resolvedActivity).toBeUndefined();
   });
 
+  it("marks an approval respond failure as stale when the session died before the response", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // Post-restart shape: a stopped session plus an approval request whose
+    // provider callback state is gone.
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-stopped-for-approval"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "stopped",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-approval-requested-dead-session"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-approval-requested-dead-session"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          payload: {
+            requestId: "approval-request-dead",
+            requestKind: "command",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.approval.respond",
+        commandId: CommandId.make("cmd-approval-respond-dead-session"),
+        threadId: ThreadId.make("thread-1"),
+        requestId: asApprovalRequestId("approval-request-dead"),
+        decision: "accept",
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      return Boolean(
+        thread?.activities.some((activity) => activity.kind === "provider.approval.respond.failed"),
+      );
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    const failureActivity = thread?.activities.find(
+      (activity) => activity.kind === "provider.approval.respond.failed",
+    );
+    // The stale marker is the clearing vocabulary: without it the dead
+    // approval would block the composer forever.
+    expect(failureActivity?.payload).toMatchObject({
+      requestId: "approval-request-dead",
+      detail: expect.stringContaining("Stale pending approval request: approval-request-dead"),
+    });
+  });
+
   it("reacts to thread.session.stop by stopping provider session and clearing thread session state", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -2995,5 +3072,127 @@ describe("ProviderCommandReactor", () => {
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.providerInstanceId).toBe(ProviderInstanceId.make("codex_work"));
     expect(thread?.session?.activeTurnId).toBeNull();
+  });
+
+  it("clears open blocking requests when a session stop declares the thread interrupted", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-session-set-for-interrupt-clears"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: "codex",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-approval-requested-before-stop"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-approval-requested-before-stop"),
+          tone: "approval",
+          kind: "approval.requested",
+          summary: "Command approval requested",
+          payload: {
+            requestId: "approval-request-open",
+            requestKind: "command",
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.activity.append",
+        commandId: CommandId.make("cmd-user-input-requested-before-stop"),
+        threadId: ThreadId.make("thread-1"),
+        activity: {
+          id: EventId.make("activity-user-input-requested-before-stop"),
+          tone: "info",
+          kind: "user-input.requested",
+          summary: "User input requested",
+          payload: {
+            requestId: "user-input-request-open",
+            questions: [
+              {
+                id: "sandbox_mode",
+                header: "Sandbox",
+                question: "Which mode should be used?",
+                options: [{ label: "workspace-write", description: "Allow workspace writes only" }],
+              },
+            ],
+          },
+          turnId: null,
+          createdAt: now,
+        },
+        createdAt: now,
+      }),
+    );
+
+    await harness.runEffect(
+      harness.engine.dispatch({
+        type: "thread.session.stop",
+        commandId: CommandId.make("cmd-session-stop-clears-requests"),
+        threadId: ThreadId.make("thread-1"),
+        createdAt: now,
+      }),
+    );
+
+    await waitFor(async () => {
+      const readModel = await harness.readModel();
+      const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+      const failureKinds = thread?.activities
+        .filter(
+          (activity) =>
+            activity.kind === "provider.approval.respond.failed" ||
+            activity.kind === "provider.user-input.respond.failed",
+        )
+        .map((activity) => activity.kind);
+      return failureKinds?.length === 2;
+    });
+
+    const readModel = await harness.readModel();
+    const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
+    expect(thread?.session?.status).toBe("stopped");
+
+    const approvalFailure = thread?.activities.find(
+      (activity) => activity.kind === "provider.approval.respond.failed",
+    );
+    expect(approvalFailure?.payload).toMatchObject({
+      requestId: "approval-request-open",
+      detail: expect.stringContaining("Stale pending approval request: approval-request-open"),
+    });
+    const userInputFailure = thread?.activities.find(
+      (activity) => activity.kind === "provider.user-input.respond.failed",
+    );
+    expect(userInputFailure?.payload).toMatchObject({
+      requestId: "user-input-request-open",
+      detail: expect.stringContaining("Stale pending user-input request: user-input-request-open"),
+    });
+
+    // Clearing must not fake a provider-side resolution: the requests are
+    // dead, not answered.
+    expect(
+      thread?.activities.some(
+        (activity) =>
+          activity.kind === "approval.resolved" || activity.kind === "user-input.resolved",
+      ),
+    ).toBe(false);
   });
 });

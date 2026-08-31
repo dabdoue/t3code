@@ -2,6 +2,7 @@ import {
   CommandId,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_INTERACTION_MODE,
+  EventId,
   type ModelSelection,
   ProjectId,
   ProviderInstanceId,
@@ -38,6 +39,10 @@ import * as ProviderService from "./provider/Services/ProviderService.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ThreadQueue from "./threadQueue.ts";
+import {
+  buildStaleRequestClearingBodies,
+  collectOpenBlockingRequests,
+} from "./orchestration/staleBlockingRequests.ts";
 import {
   formatHeadlessServeOutput,
   formatHostForUrl,
@@ -177,12 +182,13 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
   const providerService = yield* ProviderService.ProviderService;
   const threadQueue = yield* ThreadQueue.ThreadQueue;
 
-  const [activeSnapshot, archivedSnapshot, activeProviderSessions, queueSnapshot] =
+  const [activeSnapshot, archivedSnapshot, activeProviderSessions, queueSnapshot, readModel] =
     yield* Effect.all([
       projectionSnapshotQuery.getShellSnapshot(),
       projectionSnapshotQuery.getArchivedShellSnapshot(),
       providerService.listSessions(),
       threadQueue.snapshot,
+      projectionSnapshotQuery.getCommandReadModel(),
     ]);
   const activeThreadIds = new Set(activeProviderSessions.map((session) => session.threadId));
   const staleThreads = [...activeSnapshot.threads, ...archivedSnapshot.threads].filter(
@@ -232,6 +238,42 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
           },
           createdAt: updatedAt,
         });
+
+        // An open approval / user-input request is blocked-on-you work gated
+        // on provider callback state that died with the process. Without this
+        // sweep the thread keeps a composer-blocking card whose respond path
+        // can never succeed — clear each open request with the stale marker
+        // every consumer (decider, pending accounting, client fold) knows.
+        if (!thread.hasPendingApprovals && !thread.hasPendingUserInput) return;
+        const readModelThread = readModel.threads.find((entry) => entry.id === thread.id);
+        if (!readModelThread) return;
+        const openRequests = collectOpenBlockingRequests(readModelThread.activities);
+        if (
+          openRequests.approvalRequestIds.length === 0 &&
+          openRequests.userInputRequestIds.length === 0
+        ) {
+          return;
+        }
+        const clearedAt = DateTime.formatIso(yield* DateTime.now);
+        for (const body of buildStaleRequestClearingBodies(thread.id, openRequests)) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(
+              `server:startup-stale-request-clear:${thread.id}:${body.requestId}:${yield* crypto.randomUUIDv4}`,
+            ),
+            threadId: thread.id,
+            activity: {
+              id: EventId.make(yield* crypto.randomUUIDv4),
+              tone: "error",
+              kind: body.kind,
+              summary: body.summary,
+              payload: { detail: body.detail, requestId: body.requestId },
+              turnId: null,
+              createdAt: clearedAt,
+            },
+            createdAt: clearedAt,
+          });
+        }
       }),
     { concurrency: 1 },
   );

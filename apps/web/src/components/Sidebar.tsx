@@ -1590,6 +1590,9 @@ export default function Sidebar() {
   const updateThreadMetadata = useAtomCommand(threadEnvironment.updateMetadata, {
     reportFailure: false,
   });
+  const stopThreadSession = useAtomCommand(threadEnvironment.stopSession, {
+    reportFailure: false,
+  });
   const { copyToClipboard: copyPathToClipboard } = useCopyToClipboard<{ path: string }>({
     onCopy: ({ path }) => {
       toastManager.add({
@@ -2902,6 +2905,8 @@ export default function Sidebar() {
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
               isRegeneratingTitle,
+              hasInterruptibleSession:
+                thread.session !== null && thread.session.status !== "stopped",
               supports: {
                 settlement: supportsSettlement,
                 snooze: supportsSnooze,
@@ -2951,6 +2956,34 @@ export default function Sidebar() {
           case "unsettle":
             attemptUnsettle(threadRef);
             return;
+          case "mark-interrupted": {
+            const result = await stopThreadSession({
+              environmentId: threadRef.environmentId,
+              input: { threadId: threadRef.threadId },
+            });
+            if (result._tag === "Failure") {
+              if (!isAtomCommandInterrupted(result)) {
+                const error = squashAtomCommandFailure(result);
+                toastManager.add(
+                  stackedThreadToast({
+                    type: "error",
+                    title: "Failed to mark thread interrupted",
+                    description: error instanceof Error ? error.message : "An error occurred.",
+                  }),
+                );
+              }
+              return;
+            }
+            toastManager.add(
+              stackedThreadToast({
+                type: "success",
+                title: "Thread marked interrupted",
+                description: "Send a message to continue where the thread left off.",
+                timeout: 5_000,
+              }),
+            );
+            return;
+          }
           case "unsnooze":
             attemptUnsnooze(threadRef);
             return;

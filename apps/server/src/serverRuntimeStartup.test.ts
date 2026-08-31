@@ -136,6 +136,7 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
 
     yield* ServerRuntimeStartup.reconcileStaleProviderSessions.pipe(
       Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getCommandReadModel: () => Effect.succeed({ threads: [] }),
         getShellSnapshot: () =>
           Effect.succeed({
             snapshotSequence: 1,
@@ -198,6 +199,131 @@ it.effect("reconciles projected sessions that have no live provider runtime", ()
   }),
 );
 
+it.effect("clears open blocking requests on stale threads during startup reconcile", () =>
+  Effect.gen(function* () {
+    const staleThreadId = ThreadId.make("thread-stale-with-plan");
+    const dispatched = yield* Ref.make<ReadonlyArray<unknown>>([]);
+    const now = "2026-08-12T00:00:00.000Z";
+
+    yield* ServerRuntimeStartup.reconcileStaleProviderSessions.pipe(
+      Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        // Open approval, open user-input, already-resolved approval, and one
+        // previously cleared by a stale marker — only the first two should
+        // get clearing activities.
+        getCommandReadModel: () =>
+          Effect.succeed({
+            threads: [
+              {
+                id: staleThreadId,
+                activities: [
+                  {
+                    id: "evt-1",
+                    createdAt: "2026-08-11T00:00:01.000Z",
+                    kind: "approval.requested",
+                    payload: { requestId: "approval-open" },
+                  },
+                  {
+                    id: "evt-2",
+                    createdAt: "2026-08-11T00:00:02.000Z",
+                    kind: "user-input.requested",
+                    payload: { requestId: "input-open" },
+                  },
+                  {
+                    id: "evt-3",
+                    createdAt: "2026-08-11T00:00:03.000Z",
+                    kind: "approval.requested",
+                    payload: { requestId: "approval-resolved" },
+                  },
+                  {
+                    id: "evt-4",
+                    createdAt: "2026-08-11T00:00:04.000Z",
+                    kind: "approval.resolved",
+                    payload: { requestId: "approval-resolved" },
+                  },
+                  {
+                    id: "evt-5",
+                    createdAt: "2026-08-11T00:00:05.000Z",
+                    kind: "approval.requested",
+                    payload: { requestId: "approval-already-cleared" },
+                  },
+                  {
+                    id: "evt-6",
+                    createdAt: "2026-08-11T00:00:06.000Z",
+                    kind: "provider.approval.respond.failed",
+                    payload: {
+                      requestId: "approval-already-cleared",
+                      detail: "Stale pending approval request: approval-already-cleared.",
+                    },
+                  },
+                ],
+              },
+            ],
+          }),
+        getShellSnapshot: () =>
+          Effect.succeed({
+            snapshotSequence: 1,
+            projects: [],
+            threads: [
+              {
+                id: staleThreadId,
+                hasPendingApprovals: true,
+                hasPendingUserInput: true,
+                session: {
+                  threadId: staleThreadId,
+                  status: "running",
+                  providerName: "codex",
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  runtimeMode: "full-access",
+                  activeTurnId: "turn-plan",
+                  lastError: null,
+                  updatedAt: now,
+                },
+              },
+            ],
+            updatedAt: now,
+          }),
+        getArchivedShellSnapshot: () =>
+          Effect.succeed({ snapshotSequence: 1, projects: [], threads: [], updatedAt: now }),
+      } as never),
+      Effect.provideService(ProviderService.ProviderService, {
+        listSessions: () => Effect.succeed([]),
+        stopSession: () => Effect.void,
+      } as never),
+      Effect.provideService(ThreadQueue.ThreadQueue, {
+        snapshot: Effect.succeed({ revision: 1, messages: [], heldThreadIds: [] }),
+        holdThreads: () => Effect.succeed({ revision: 1, messages: [], heldThreadIds: [] }),
+      } as never),
+      Effect.provideService(OrchestrationEngine.OrchestrationEngineService, {
+        readEvents: () => Stream.empty,
+        dispatch: (command) =>
+          Ref.update(dispatched, (commands) => [...commands, command]).pipe(
+            Effect.as({ sequence: 2 }),
+          ),
+        streamDomainEvents: Stream.empty,
+        latestSequence: Effect.succeed(1),
+      }),
+      Effect.provide(NodeServices.layer),
+    );
+
+    const commands = (yield* Ref.get(dispatched)) as ReadonlyArray<{
+      readonly type: string;
+      readonly activity?: {
+        readonly kind: string;
+        readonly payload: { readonly detail: string; readonly requestId: string };
+      };
+    }>;
+    const sessionSet = commands.filter((command) => command.type === "thread.session.set");
+    assert.equal(sessionSet.length, 1);
+    const clearing = commands.filter((command) => command.type === "thread.activity.append");
+    assert.equal(clearing.length, 2);
+    const clearedIds = clearing.map((command) => command.activity?.payload.requestId).sort();
+    assert.deepStrictEqual(clearedIds, ["approval-open", "input-open"]);
+    for (const command of clearing) {
+      assert.match(command.activity?.payload.detail ?? "", /^stale pending /i);
+    }
+  }),
+);
+
 it.effect("holds leftover queued threads on startup even when the parent is idle", () =>
   Effect.gen(function* () {
     const idleQueuedThreadId = ThreadId.make("thread-idle-queued");
@@ -206,6 +332,7 @@ it.effect("holds leftover queued threads on startup even when the parent is idle
 
     yield* ServerRuntimeStartup.reconcileStaleProviderSessions.pipe(
       Effect.provideService(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getCommandReadModel: () => Effect.succeed({ threads: [] }),
         getShellSnapshot: () =>
           Effect.succeed({
             snapshotSequence: 1,

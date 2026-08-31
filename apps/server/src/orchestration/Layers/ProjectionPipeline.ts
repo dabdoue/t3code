@@ -54,6 +54,10 @@ import {
   parseThreadSegmentFromAttachmentId,
   toSafeThreadAttachmentSegment,
 } from "../../attachmentStore.ts";
+import {
+  isStaleApprovalFailureDetail,
+  isStaleUserInputFailureDetail,
+} from "../staleBlockingRequests.ts";
 
 export const ORCHESTRATION_PROJECTOR_NAMES = {
   projects: "projection.projects",
@@ -120,14 +124,7 @@ function extractActivityRequestId(payload: unknown): ApprovalRequestId | null {
 }
 
 function isStalePendingApprovalFailureDetail(detail: string | null): boolean {
-  if (detail === null) {
-    return false;
-  }
-  return (
-    detail.includes("stale pending approval request") ||
-    detail.includes("unknown pending approval request") ||
-    detail.includes("unknown pending permission request")
-  );
+  return isStaleApprovalFailureDetail(detail);
 }
 
 function derivePendingUserInputCountFromActivities(
@@ -163,11 +160,7 @@ function derivePendingUserInputCountFromActivities(
 
     if (
       activity.kind === "provider.user-input.respond.failed" &&
-      detail !== null &&
-      (detail.includes("stale pending user-input request") ||
-        detail.includes("unknown pending user-input request") ||
-        detail.includes("unknown pending user input request") ||
-        detail.includes("unknown pending codex user input request"))
+      isStaleUserInputFailureDetail(detail)
     ) {
       openRequestIds.delete(requestId);
     }
