@@ -28,7 +28,8 @@ export function isStaleApprovalFailureDetail(detail: string | null): boolean {
   return (
     lowered.includes("stale pending approval request") ||
     lowered.includes("unknown pending approval request") ||
-    lowered.includes("unknown pending permission request")
+    lowered.includes("unknown pending permission request") ||
+    lowered.includes("unknown pending codex approval request")
   );
 }
 

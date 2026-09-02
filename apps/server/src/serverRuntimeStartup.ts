@@ -8,6 +8,7 @@ import {
   ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -34,8 +35,9 @@ import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as ServerEnvironment from "./environment/ServerEnvironment.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
-import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import * as ProviderService from "./provider/Services/ProviderService.ts";
+import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDirectory.ts";
+import * as ProviderSessionReaper from "./provider/Services/ProviderSessionReaper.ts";
 import { forkParked } from "./serverActivation.ts";
 import * as ServiceLauncherClient from "./cloud/serviceLauncherClient.ts";
 import * as ThreadQueue from "./threadQueue.ts";
@@ -286,7 +288,7 @@ export const reconcileStaleProviderSessions = Effect.gen(function* () {
   }
 });
 
-export const getAutoBootstrapDefaultModelSelection = (): ModelSelection => ({
+export const getAutoBootstrapThreadModelSelection = (): ModelSelection => ({
   instanceId: ProviderInstanceId.make("codex"),
   model: DEFAULT_MODEL,
 });
@@ -319,26 +321,25 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
         serverConfig.cwd,
       );
       let nextProjectId: ProjectId;
-      let nextProjectDefaultModelSelection: ModelSelection;
+      let nextThreadModelSelection: ModelSelection;
 
       if (Option.isNone(existingProject)) {
         const createdAt = DateTime.formatIso(yield* DateTime.now);
         nextProjectId = ProjectId.make(yield* randomUUID);
         const bootstrapProjectTitle = path.basename(serverConfig.cwd) || "project";
-        nextProjectDefaultModelSelection = getAutoBootstrapDefaultModelSelection();
+        nextThreadModelSelection = getAutoBootstrapThreadModelSelection();
         yield* orchestrationEngine.dispatch({
           type: "project.create",
           commandId: CommandId.make(yield* randomUUID),
           projectId: nextProjectId,
           title: bootstrapProjectTitle,
           workspaceRoot: serverConfig.cwd,
-          defaultModelSelection: nextProjectDefaultModelSelection,
           createdAt,
         });
       } else {
         nextProjectId = existingProject.value.id;
-        nextProjectDefaultModelSelection =
-          existingProject.value.defaultModelSelection ?? getAutoBootstrapDefaultModelSelection();
+        nextThreadModelSelection =
+          existingProject.value.defaultModelSelection ?? getAutoBootstrapThreadModelSelection();
       }
 
       const existingThreadId =
@@ -352,7 +353,7 @@ export const resolveAutoBootstrapWelcomeTargets = Effect.gen(function* () {
           threadId: createdThreadId,
           projectId: nextProjectId,
           title: "New thread",
-          modelSelection: nextProjectDefaultModelSelection,
+          modelSelection: nextThreadModelSelection,
           interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
           runtimeMode: "full-access",
           branch: null,
@@ -412,6 +413,89 @@ const runStartupPhase = <A, E, R>(phase: string, effect: Effect.Effect<A, E, R>)
     Effect.annotateSpans({ "startup.phase": phase }),
     Effect.withSpan(`server.startup.${phase}`),
   );
+
+const ORPHANED_PROVIDER_SESSION_ERROR =
+  "Provider session did not survive a server restart. Send a new message to continue.";
+
+export const reconcileProviderSessions = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
+  const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const providerService = yield* ProviderService.ProviderService;
+  const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+
+  const liveThreadIds = new Set(
+    (yield* providerService.listSessions()).map((session) => session.threadId),
+  );
+  const { threads } = yield* query.getCommandReadModel();
+  const orphanedThreads = threads.filter(
+    (thread) =>
+      thread.session !== null &&
+      (thread.session.status === "starting" ||
+        thread.session.status === "running" ||
+        thread.session.activeTurnId !== null) &&
+      !liveThreadIds.has(thread.id),
+  );
+
+  for (const thread of orphanedThreads) {
+    const session = thread.session;
+    if (session === null) {
+      continue;
+    }
+    yield* Effect.gen(function* () {
+      const binding = yield* directory.getBinding(thread.id);
+      if (Option.isSome(binding)) {
+        yield* directory.upsert({
+          ...binding.value,
+          status: "stopped",
+          runtimePayload: { activeTurnId: null },
+        });
+      }
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("failed to reconcile orphaned provider session directory binding", {
+              threadId: thread.id,
+              cause,
+            }),
+      ),
+    );
+
+    yield* Effect.gen(function* () {
+      const reconciledAt = DateTime.formatIso(yield* DateTime.now);
+      yield* orchestrationEngine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId: thread.id,
+        session: {
+          ...session,
+          status: "error",
+          activeTurnId: null,
+          lastError: ORPHANED_PROVIDER_SESSION_ERROR,
+          updatedAt: reconciledAt,
+        },
+        createdAt: reconciledAt,
+      });
+    }).pipe(
+      Effect.retry({ times: 1 }),
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.failCause(cause)
+          : Effect.logWarning("failed to settle orphaned provider session projection", {
+              threadId: thread.id,
+              cause,
+            }),
+      ),
+    );
+  }
+}).pipe(
+  Effect.catchCause((cause) =>
+    Cause.hasInterrupts(cause)
+      ? Effect.failCause(cause)
+      : Effect.logWarning("provider session startup reconciliation failed", { cause }),
+  ),
+);
 
 interface StartupOptions {
   readonly activate?: Effect.Effect<void>;
@@ -479,6 +563,8 @@ export const make = (options?: StartupOptions) =>
           yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
         }),
       );
+
+      yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
 
       const welcomeBase = yield* resolveWelcomeBase;
       const environment = yield* serverEnvironment.getDescriptor;
