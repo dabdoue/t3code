@@ -3500,6 +3500,15 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
 
+    // Newer Claude Code CLIs (2.1.x) emit `command_lifecycle` telemetry that
+    // this build's SDK typings (0.3.170) predate, so the exhaustiveness switch
+    // below would surface every occurrence as a runtime warning. The event
+    // carries only command_uuid/state bookkeeping with no T3 surface, and the
+    // native log above already captured it, so consume it deliberately.
+    if ((message as { type: string }).type === "command_lifecycle") {
+      return;
+    }
+
     switch (message.type) {
       case "stream_event":
         yield* handleStreamEvent(context, message);
