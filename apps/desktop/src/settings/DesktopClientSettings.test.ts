@@ -15,7 +15,6 @@ import * as DesktopClientSettings from "./DesktopClientSettings.ts";
 const clientSettings: ClientSettings = {
   activeTurnMessageBehavior: "queue",
   appearanceContrast: 100,
-  autoOpenPlanSidebar: false,
   browserDefaultViewport: { _tag: "preset", width: 1024, height: 600, presetId: "nest-hub" },
   browserDefaultZoomFactor: 1.25,
   browserDefaultAppearance: "dark",

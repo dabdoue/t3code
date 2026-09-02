@@ -565,7 +565,6 @@ export function useSettingsRestore(onRestored?: () => void) {
     [
       isTextGenerationModelDirty,
       isBackgroundActivityDirty,
-      settings.autoOpenPlanSidebar,
       settings.activeTurnMessageBehavior,
       settings.browserDefaultViewport,
       settings.browserDefaultZoomFactor,
