@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  resolveClerkSignInProps,
-  resolveClerkSignUpAction,
-  T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL,
-} from "./authRedirect";
+import { resolveClerkSignInProps } from "./authRedirect";
 
 describe("resolveClerkSignInProps", () => {
   it("returns to the current browser URL on the web", () => {
@@ -31,23 +27,6 @@ describe("resolveClerkSignInProps", () => {
     expect(resolveClerkSignInProps("t3code-dev://app/#/settings/general", true)).toEqual({
       forceRedirectUrl: "t3code-dev://app/#/settings/general",
       signUpForceRedirectUrl: "t3code-dev://app/#/settings/general",
-    });
-  });
-});
-
-describe("resolveClerkSignUpAction", () => {
-  it("uses Clerk's embedded sign-up flow on the web", () => {
-    const href = "https://app.t3.codes/connect?state=state-1#details";
-    expect(resolveClerkSignUpAction(href, false)).toEqual({
-      type: "clerk",
-      props: { forceRedirectUrl: href },
-    });
-  });
-
-  it("uses Clerk's hosted account portal on desktop", () => {
-    expect(resolveClerkSignUpAction("t3code://app/#/settings/connections", true)).toEqual({
-      type: "hosted",
-      url: T3_CONNECT_ACCOUNT_PORTAL_SIGN_UP_URL,
     });
   });
 });

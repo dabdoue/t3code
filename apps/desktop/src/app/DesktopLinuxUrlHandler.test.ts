@@ -167,7 +167,13 @@ describe("DesktopLinuxUrlHandler", () => {
     const recorded = emptyRecording();
 
     return Effect.gen(function* () {
-      yield* runRegister(recorded);
+      const originalArgv = process.argv;
+      process.argv = [...originalArgv, "--no-sandbox", "--ozone-platform=x11"];
+      try {
+        yield* runRegister(recorded);
+      } finally {
+        process.argv = originalArgv;
+      }
 
       assert.deepEqual(recorded.directories, ["/home/alice/.local/share/applications"]);
       assert.equal(recorded.files.length, 1);
@@ -177,7 +183,7 @@ describe("DesktopLinuxUrlHandler", () => {
       );
       assert.include(
         recorded.files[0]?.content,
-        'Exec="/home/alice/Applications/T3-Code.AppImage" %U',
+        'Exec="/home/alice/Applications/T3-Code.AppImage" "--no-sandbox" "--ozone-platform=x11" %U',
       );
       assert.include(recorded.files[0]?.content, "MimeType=x-scheme-handler/t3code;");
       assert.deepEqual(recorded.commands, [

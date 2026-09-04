@@ -1,5 +1,5 @@
 import { UserButton, useAuth } from "@clerk/react";
-import { LogInIcon, ServerIcon, SmartphoneIcon, UserPlusIcon } from "lucide-react";
+import { LogInIcon, ServerIcon, SmartphoneIcon } from "lucide-react";
 
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { SidebarMenu, SidebarMenuButton, SidebarMenuItem } from "../ui/sidebar";
@@ -53,7 +53,7 @@ function ConfiguredT3ConnectSidebarAvatar() {
 
 function ConfiguredT3ConnectSidebarSignIn() {
   const { isLoaded, isSignedIn } = useAuth();
-  const { authPrompt, openAuthPrompt, openSignUpPrompt } = useT3ConnectAuthPrompt();
+  const { authPrompt, openAuthPrompt } = useT3ConnectAuthPrompt();
 
   if (!isLoaded || isSignedIn) return null;
 
@@ -64,12 +64,6 @@ function ConfiguredT3ConnectSidebarSignIn() {
           <SidebarMenuButton onClick={openAuthPrompt}>
             <LogInIcon />
             <span>Sign in to T3 Connect</span>
-          </SidebarMenuButton>
-        </SidebarMenuItem>
-        <SidebarMenuItem>
-          <SidebarMenuButton onClick={openSignUpPrompt}>
-            <UserPlusIcon />
-            <span>Create T3 Connect account</span>
           </SidebarMenuButton>
         </SidebarMenuItem>
       </SidebarMenu>

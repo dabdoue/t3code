@@ -116,11 +116,15 @@ export const make = Effect.gen(function* () {
         displayName: environment.displayName,
         execTarget,
         // AppImageLauncher commonly starts Electron with --no-sandbox when
-        // the embedded chrome-sandbox is not installed setuid. A protocol
-        // activation starts a second instance, so it must preserve that flag
-        // or the OAuth callback process exits before Clerk can forward the
+        // the embedded chrome-sandbox is not installed setuid. The packaged
+        // Linux launcher also forces X11 because this host rejects the
+        // Wayland/Vulkan path, so a protocol activation must preserve both
+        // flags or the secondary instance exits before Clerk can forward the
         // deep link to the primary instance.
-        execArguments: process.argv.includes("--no-sandbox") ? ["--no-sandbox"] : [],
+        execArguments: [
+          ...(process.argv.includes("--no-sandbox") ? ["--no-sandbox"] : []),
+          ...(process.argv.includes("--ozone-platform=x11") ? ["--ozone-platform=x11"] : []),
+        ],
         scheme,
       }),
     );
