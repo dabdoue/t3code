@@ -76,6 +76,7 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { UsageProviderSettings } from "./UsageProviderSettings";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { providerSettingsTabClassName } from "./providerSettingsTabs";
 import { searchableSetting } from "./settingsSearch";
@@ -1020,6 +1021,14 @@ export function EnvironmentProviderSettings({
           </Collapsible>
         </div>
       </SettingsSection>
+
+      <UsageProviderSettings
+        key={environmentId}
+        environmentId={environmentId}
+        environmentLabel={environmentLabel}
+        sources={settings.usageLimitSources}
+        readOnly={readOnly}
+      />
 
       {isAddInstanceDialogOpen ? (
         <AddProviderInstanceDialog
