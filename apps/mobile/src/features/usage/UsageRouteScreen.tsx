@@ -19,6 +19,7 @@ import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import { UsageDailyChart } from "./UsageDailyChart";
+import { UsageLimitsSection } from "./UsageLimitsSection";
 import type { UsageChartMetric } from "./usageChartData";
 import { PROVIDER_LABEL, useProviderColors } from "./usageProviders";
 
@@ -94,6 +95,7 @@ export function UsageRouteScreen() {
               untilDay={window.untilDay}
             />
             <ProviderSection merged={merged} metric={metric} />
+            <UsageLimitsSection />
             <TotalsSection merged={merged} />
             <ModelsSection merged={merged} />
           </>
