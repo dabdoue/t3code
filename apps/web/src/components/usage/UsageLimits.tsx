@@ -7,7 +7,6 @@ import {
   ServerProviderUsageWindow,
   UsageLimitSourceAccount,
   UsageLimitSourceSnapshot,
-  UsageProviderKind,
 } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -53,9 +52,18 @@ const PACE: Record<LimitPace, { readonly label: string; readonly icon: typeof Ga
 
 /** The series colour the cost chart uses for this driver, so the two views read as one. */
 function barColor(driver: ServerProvider["driver"]): string {
-  const kind: UsageProviderKind | undefined =
-    driver === "codex" ? "codex" : driver === "claudeAgent" ? "claude" : undefined;
-  return kind ? PROVIDER_PRESENTATION[kind].color : "var(--foreground)";
+  switch (driver) {
+    case "claudeAgent":
+      return PROVIDER_PRESENTATION.claude.color;
+    case "codex":
+      return PROVIDER_PRESENTATION.codex.color;
+    case "cursor":
+      // Cursor's mark is monochrome like Codex; reuse that series so Limits
+      // does not invent a third neutral that collapses into Grok's band.
+      return PROVIDER_PRESENTATION.codex.color;
+    default:
+      return "var(--foreground)";
+  }
 }
 
 /** Pace as a glyph with the words on hover. */

@@ -8,13 +8,15 @@ separate from the raw token cost shown here.
 Grok Build totals come from persisted session updates. Interactive turns that never wrote a
 completed-turn record will not appear.
 
-The **Limits** view shows how much of each subscription window you have used on Codex and Claude
-Code, per connected environment: the session and weekly windows, plus a per-model weekly window
-such as Fable when your plan has one. Each window is a bar from the moment it opened to its reset,
+The **Limits** view shows how much of each subscription window you have used on Codex, Claude
+Code, and Cursor, per connected environment. Codex and Claude Code report session and weekly
+windows, plus a per-model weekly window such as Fable when your plan has one. Cursor reports the
+two included monthly pools from its Spending page: Cursor Models (Auto, Composer, Cursor Grok) and
+Other Models (named / API). Each window is a bar from the moment it opened to its reset,
 filled by the share of quota spent; a thin line marks how far into the window you are, which is
 also where even spending would have put the fill, and the icon beside the label says whether you
 are ahead of, on, or under that pace. Hover a bar for the exact reset time. Limits refresh on the
-provider health-check interval and update live while a turn runs. API-key accounts have no
+provider health-check interval. Codex and Claude also update live while a turn runs. API-key accounts have no
 subscription windows and say so; that includes a Claude Code that reaches Anthropic through a proxy
 via `ANTHROPIC_AUTH_TOKEN`, since the CLI then treats itself as an API-key client.
 

@@ -93,11 +93,17 @@ describe("providersWithLimits", () => {
   it("keeps only usable providers whose driver reports limits at all", () => {
     const limits = { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] };
     const codex = provider({ usageLimits: limits });
+    const cursor = provider({
+      instanceId: ProviderInstanceId.make("cursor"),
+      driver: ProviderDriverKind.make("cursor"),
+      usageLimits: limits,
+    });
     expect(
       providersWithLimits([
         codex,
+        cursor,
         provider({
-          instanceId: ProviderInstanceId.make("cursor"),
+          instanceId: ProviderInstanceId.make("silent-cursor"),
           driver: ProviderDriverKind.make("cursor"),
         }),
         provider({
@@ -116,7 +122,7 @@ describe("providersWithLimits", () => {
           usageLimits: limits,
         }),
       ]),
-    ).toEqual([codex]);
+    ).toEqual([codex, cursor]);
   });
 });
 
@@ -183,7 +189,7 @@ describe("collectLimitSources", () => {
     ]);
   }
 
-  it.each(["codex", "claudeAgent"])(
+  it.each(["codex", "claudeAgent", "cursor"])(
     "prefers native %s limits by email without changing provider rows or source snapshots",
     (kind) => {
       const driver = ProviderDriverKind.make(kind);

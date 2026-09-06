@@ -37,7 +37,6 @@ export function UsageProviderSettings({
     <>
       <SettingsSection
         {...searchableSetting("usage-providers")}
-        description="Connect a CLIProxyAPI hub to show its accounts on Usage → Limits."
         headerAction={
           !readOnly ? (
             <Button size="xs" variant="outline" onClick={() => setAdding(true)}>
@@ -48,7 +47,10 @@ export function UsageProviderSettings({
         }
       >
         {entries.length === 0 ? (
-          <SettingsRow title="No usage providers configured." />
+          <SettingsRow
+            title="No usage providers configured."
+            description="Connect a CLIProxyAPI hub to show its accounts on Usage → Limits."
+          />
         ) : (
           entries.map(([id, source]) => {
             const label = source.label?.trim() || source.url;

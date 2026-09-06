@@ -4,7 +4,10 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import type * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 import type * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 import { describe, expect, it } from "vite-plus/test";
 import type * as EffectAcpSchema from "effect-acp/schema";
@@ -24,14 +27,37 @@ import {
   resolveCursorAcpBaseModelId,
   resolveCursorAcpConfigUpdates,
 } from "./CursorProvider.ts";
+import {
+  cursorSessionCookieFromAccessToken,
+  cursorUsageSummaryToLimits,
+  resetCursorUsageLimitsCacheForTests,
+} from "./cursorUsageLimits.ts";
+
+const encodeUnknownJson = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
+
+const unusedUsageHttpClient = HttpClient.make((request) =>
+  Effect.succeed(HttpClientResponse.fromWeb(request, Response.json({}))),
+);
 
 const runNode = <A, E>(
   effect: Effect.Effect<
     A,
     E,
-    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+    | ChildProcessSpawner.ChildProcessSpawner
+    | Crypto.Crypto
+    | FileSystem.FileSystem
+    | HttpClient.HttpClient
+    | Path.Path
   >,
-): Promise<A> => Effect.runPromise(effect.pipe(Effect.provide(NodeServices.layer)));
+  httpClient: HttpClient.HttpClient = unusedUsageHttpClient,
+): Promise<A> =>
+  Effect.runPromise(
+    effect.pipe(
+      Effect.provide(
+        Layer.mergeAll(NodeServices.layer, Layer.succeed(HttpClient.HttpClient, httpClient)),
+      ),
+    ),
+  );
 
 const resolveMockAgentPath = Effect.fn("resolveMockAgentPath")(function* () {
   const path = yield* Path.Path;
@@ -471,6 +497,72 @@ describe("checkCursorProviderStatus", () => {
       "claude-opus-4-6",
     ]);
     await expect(runNode(waitForFileContent(requestLogPath))).resolves.toContain("initialize");
+  });
+
+  it("attaches dashboard usage windows when the CLI is signed in", async () => {
+    resetCursorUsageLimitsCacheForTests();
+    const tokenHeader = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url");
+    const tokenPayload = Buffer.from(JSON.stringify({ sub: "auth0|user_01ABC" })).toString(
+      "base64url",
+    );
+    const accessToken = `${tokenHeader}.${tokenPayload}.sig`;
+    const summary = {
+      billingCycleStart: "2026-08-21T00:00:00.000Z",
+      billingCycleEnd: "2026-09-21T00:00:00.000Z",
+      individualUsage: { plan: { autoPercentUsed: 12, apiPercentUsed: 40 } },
+    };
+    const { requestLogPath, wrapperPath, home, configHome } = await runNode(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const fixture = yield* makeProviderStatusEnvFixture();
+        const home = yield* fileSystem.makeTempDirectory({
+          directory: NodeOS.tmpdir(),
+          prefix: "cursor-status-usage-home-",
+        });
+        const configHome = path.join(home, ".config");
+        yield* fileSystem.makeDirectory(path.join(configHome, "cursor"), { recursive: true });
+        yield* fileSystem.writeFileString(
+          path.join(configHome, "cursor", "auth.json"),
+          encodeUnknownJson({ accessToken }),
+        );
+        return { ...fixture, home, configHome };
+      }),
+    );
+
+    const cookies: string[] = [];
+    const httpClient = HttpClient.make((request) => {
+      cookies.push(request.headers.cookie ?? "");
+      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(summary)));
+    });
+
+    const provider = await runNode(
+      checkCursorProviderStatus(
+        {
+          enabled: true,
+          binaryPath: wrapperPath,
+          apiEndpoint: "",
+          customModels: [],
+        },
+        {
+          ...process.env,
+          HOME: home,
+          XDG_CONFIG_HOME: configHome,
+          T3_ACP_REQUEST_LOG_PATH: requestLogPath,
+        },
+      ),
+      httpClient,
+    );
+
+    expect(provider.usageLimits).toEqual(
+      cursorUsageSummaryToLimits({
+        summary,
+        checkedAt: provider.checkedAt,
+      }),
+    );
+    expect(cookies).toEqual([
+      `WorkosCursorSessionToken=${cursorSessionCookieFromAccessToken(accessToken)}`,
+    ]);
   });
 });
 
