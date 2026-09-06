@@ -2,6 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import { vi } from "vite-plus/test";
 
@@ -9,7 +10,9 @@ import type * as Electron from "electron";
 
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
+import * as ElectronTray from "../electron/ElectronTray.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
+import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopLifecycle from "./DesktopLifecycle.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
@@ -19,6 +22,7 @@ import * as DesktopWindow from "../window/DesktopWindow.ts";
 function makeElectronAppLayer(
   appListeners: Map<string, (...args: readonly unknown[]) => void>,
   quit: Effect.Effect<void> = Effect.void,
+  exit: Effect.Effect<void> = Effect.void,
 ) {
   const registerListener = (eventName: string, listener: (...args: readonly unknown[]) => void) =>
     Effect.acquireRelease(
@@ -37,7 +41,7 @@ function makeElectronAppLayer(
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
     quit,
-    exit: () => Effect.void,
+    exit: () => exit,
     relaunch: () => Effect.void,
     setPath: () => Effect.void,
     setName: () => Effect.void,
@@ -61,6 +65,27 @@ const electronThemeLayer = Layer.succeed(ElectronTheme.ElectronTheme, {
   setSource: () => Effect.void,
   onUpdated: () => Effect.void,
 });
+
+const desktopAssetsLayer = Layer.succeed(DesktopAssets.DesktopAssets, {
+  iconPaths: Effect.succeed({
+    ico: Option.none(),
+    icns: Option.none(),
+    png: Option.some("/tmp/t3-icon.png"),
+  }),
+  resolveResourcePath: () => Effect.succeed(Option.none()),
+});
+
+function makeElectronTrayLayer(calls: { replace: number; destroy: number }) {
+  return Layer.succeed(ElectronTray.ElectronTray, {
+    replace: () =>
+      Effect.sync(() => {
+        calls.replace += 1;
+      }),
+    destroy: Effect.sync(() => {
+      calls.destroy += 1;
+    }),
+  });
+}
 
 function makeElectronWindowLayer(destroyAll: Effect.Effect<void> = Effect.void) {
   return Layer.succeed(ElectronWindow.ElectronWindow, {
@@ -99,6 +124,51 @@ function makeDesktopWindowLayer(
   });
 }
 
+function makeEnvironmentLayer(platform: NodeJS.Platform) {
+  return Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+    platform,
+    isDevelopment: false,
+    displayName: "T3 Code",
+  } as DesktopEnvironment.DesktopEnvironment["Service"]);
+}
+
+function makeLifecycleLayer(input: {
+  readonly appListeners: Map<string, (...args: readonly unknown[]) => void>;
+  readonly platform?: NodeJS.Platform;
+  readonly quit?: Effect.Effect<void>;
+  readonly exit?: Effect.Effect<void>;
+  readonly destroyAll?: Effect.Effect<void>;
+  readonly activate?: Effect.Effect<void>;
+  readonly flushMainWindowBounds?: Effect.Effect<void>;
+  readonly shutdown?: Layer.Layer<DesktopShutdown.DesktopShutdown>;
+  readonly trayCalls?: { replace: number; destroy: number };
+}) {
+  return DesktopLifecycle.layer.pipe(
+    Layer.provideMerge(
+      makeElectronAppLayer(
+        input.appListeners,
+        input.quit ?? Effect.void,
+        input.exit ?? Effect.void,
+      ),
+    ),
+    Layer.provideMerge(electronThemeLayer),
+    Layer.provideMerge(makeElectronTrayLayer(input.trayCalls ?? { replace: 0, destroy: 0 })),
+    Layer.provideMerge(desktopAssetsLayer),
+    Layer.provideMerge(makeElectronWindowLayer(input.destroyAll)),
+    Layer.provideMerge(
+      makeDesktopWindowLayer({
+        ...(input.activate === undefined ? {} : { activate: input.activate }),
+        ...(input.flushMainWindowBounds === undefined
+          ? {}
+          : { flushMainWindowBounds: input.flushMainWindowBounds }),
+      }),
+    ),
+    Layer.provideMerge(makeEnvironmentLayer(input.platform ?? "darwin")),
+    Layer.provideMerge(input.shutdown ?? DesktopShutdown.layer),
+    Layer.provideMerge(DesktopState.layer),
+  );
+}
+
 describe("DesktopLifecycle", () => {
   for (const platform of ["darwin", "win32", "linux"] satisfies ReadonlyArray<NodeJS.Platform>) {
     it.effect(`lets the updater's quit event proceed on ${platform}`, () => {
@@ -107,26 +177,14 @@ describe("DesktopLifecycle", () => {
       // outlives the UI), so window-all-closed must never reach app.quit.
       const quit = vi.fn();
       let windowsDestroyed = false;
-      const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
+      const layer = makeLifecycleLayer({
+        appListeners,
         platform,
-        isDevelopment: false,
-      } as DesktopEnvironment.DesktopEnvironment["Service"]);
-
-      const layer = DesktopLifecycle.layer.pipe(
-        Layer.provideMerge(makeElectronAppLayer(appListeners, Effect.sync(quit))),
-        Layer.provideMerge(electronThemeLayer),
-        Layer.provideMerge(
-          makeElectronWindowLayer(
-            Effect.sync(() => {
-              windowsDestroyed = true;
-            }),
-          ),
-        ),
-        Layer.provideMerge(makeDesktopWindowLayer()),
-        Layer.provideMerge(environmentLayer),
-        Layer.provideMerge(DesktopShutdown.layer),
-        Layer.provideMerge(DesktopState.layer),
-      );
+        quit: Effect.sync(quit),
+        destroyAll: Effect.sync(() => {
+          windowsDestroyed = true;
+        }),
+      });
 
       return Effect.scoped(
         Effect.gen(function* () {
@@ -183,7 +241,7 @@ describe("DesktopLifecycle", () => {
         events.push("flush");
       });
 
-      const desktopShutdownLayer = Layer.succeed(DesktopShutdown.DesktopShutdown, {
+      const shutdown = Layer.succeed(DesktopShutdown.DesktopShutdown, {
         request: Effect.sync(() => {
           events.push("request");
         }).pipe(Effect.andThen(Deferred.succeed(shutdownRequested, undefined)), Effect.asVoid),
@@ -192,21 +250,6 @@ describe("DesktopLifecycle", () => {
         awaitComplete: Deferred.await(allowShutdown),
         isComplete: Deferred.isDone(allowShutdown),
       });
-
-      const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-        platform: "darwin",
-        isDevelopment: false,
-      } as DesktopEnvironment.DesktopEnvironment["Service"]);
-
-      const layer = DesktopLifecycle.layer.pipe(
-        Layer.provideMerge(makeElectronAppLayer(appListeners, quit)),
-        Layer.provideMerge(electronThemeLayer),
-        Layer.provideMerge(makeElectronWindowLayer(destroyAll)),
-        Layer.provideMerge(makeDesktopWindowLayer({ flushMainWindowBounds })),
-        Layer.provideMerge(environmentLayer),
-        Layer.provideMerge(desktopShutdownLayer),
-        Layer.provideMerge(DesktopState.layer),
-      );
 
       yield* Effect.scoped(
         Effect.gen(function* () {
@@ -224,7 +267,17 @@ describe("DesktopLifecycle", () => {
           assert.deepEqual(eventsBeforeCleanup, ["flush", "destroy", "request"]);
           assert.deepEqual(events, ["flush", "destroy", "request", "quit"]);
         }),
-      ).pipe(Effect.provide(layer));
+      ).pipe(
+        Effect.provide(
+          makeLifecycleLayer({
+            appListeners,
+            quit,
+            destroyAll,
+            flushMainWindowBounds,
+            shutdown,
+          }),
+        ),
+      );
     }),
   );
 
@@ -235,19 +288,6 @@ describe("DesktopLifecycle", () => {
       const activate = Effect.sync(() => {
         activationCount += 1;
       });
-      const environmentLayer = Layer.succeed(DesktopEnvironment.DesktopEnvironment, {
-        platform: "darwin",
-        isDevelopment: false,
-      } as DesktopEnvironment.DesktopEnvironment["Service"]);
-      const layer = DesktopLifecycle.layer.pipe(
-        Layer.provideMerge(makeElectronAppLayer(appListeners)),
-        Layer.provideMerge(electronThemeLayer),
-        Layer.provideMerge(makeElectronWindowLayer()),
-        Layer.provideMerge(makeDesktopWindowLayer({ activate })),
-        Layer.provideMerge(environmentLayer),
-        Layer.provideMerge(DesktopShutdown.layer),
-        Layer.provideMerge(DesktopState.layer),
-      );
 
       yield* Effect.scoped(
         Effect.gen(function* () {
@@ -257,10 +297,100 @@ describe("DesktopLifecycle", () => {
           yield* Ref.set(state.quitting, true);
 
           appListeners.get("activate")?.();
+          yield* Effect.yieldNow;
 
           assert.equal(activationCount, 0);
         }),
-      ).pipe(Effect.provide(layer));
+      ).pipe(Effect.provide(makeLifecycleLayer({ appListeners, activate })));
+    }),
+  );
+
+  it.effect("recreates the window when a second instance launches after the UI closed", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      let activationCount = 0;
+      const activate = Effect.sync(() => {
+        activationCount += 1;
+      });
+      const trayCalls = { replace: 0, destroy: 0 };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          yield* lifecycle.register;
+
+          appListeners.get("second-instance")?.();
+          yield* Effect.yieldNow;
+
+          assert.equal(activationCount, 1);
+          assert.equal(trayCalls.destroy, 1);
+        }),
+      ).pipe(
+        Effect.provide(
+          makeLifecycleLayer({
+            appListeners,
+            platform: "linux",
+            activate,
+            trayCalls,
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("shows a linux tray after every window closes and hides it when a window returns", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const trayCalls = { replace: 0, destroy: 0 };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          yield* lifecycle.register;
+
+          appListeners.get("window-all-closed")?.();
+          yield* Effect.yieldNow;
+          assert.equal(trayCalls.replace, 1);
+
+          appListeners.get("browser-window-created")?.();
+          yield* Effect.yieldNow;
+          assert.equal(trayCalls.destroy, 1);
+        }),
+      ).pipe(
+        Effect.provide(
+          makeLifecycleLayer({
+            appListeners,
+            platform: "linux",
+            trayCalls,
+          }),
+        ),
+      );
+    }),
+  );
+
+  it.effect("does not show a background tray on macOS after every window closes", () =>
+    Effect.gen(function* () {
+      const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+      const trayCalls = { replace: 0, destroy: 0 };
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+          yield* lifecycle.register;
+
+          appListeners.get("window-all-closed")?.();
+          yield* Effect.yieldNow;
+          assert.equal(trayCalls.replace, 0);
+        }),
+      ).pipe(
+        Effect.provide(
+          makeLifecycleLayer({
+            appListeners,
+            platform: "darwin",
+            trayCalls,
+          }),
+        ),
+      );
     }),
   );
 });

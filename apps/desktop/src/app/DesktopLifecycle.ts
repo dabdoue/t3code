@@ -1,20 +1,30 @@
+// @effect-diagnostics globalTimers:off -- Quit cannot hang on Effect Clock; Node timers bound backend shutdown and force-exit.
 import * as Context from "effect/Context";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 
 import type * as Electron from "electron";
 
+import * as DesktopAssets from "./DesktopAssets.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import { makeComponentLogger } from "./DesktopObservability.ts";
 import * as DesktopShutdown from "./DesktopShutdown.ts";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronTheme from "../electron/ElectronTheme.ts";
+import * as ElectronTray from "../electron/ElectronTray.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopState from "./DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+
+// Matches the backend stop budget used by update-install, plus a small buffer
+// so a hung child cannot cancel the user's quit.
+const BACKEND_SHUTDOWN_WAIT = Duration.seconds(8);
+const FORCE_EXIT_AFTER_QUIT = Duration.seconds(3);
 
 export class DesktopLifecycleRelaunchError extends Schema.TaggedErrorClass<DesktopLifecycleRelaunchError>()(
   "DesktopLifecycleRelaunchError",
@@ -38,10 +48,12 @@ export type DesktopLifecycleRuntimeServices =
 
 type DesktopLifecycleRegistrationServices =
   | DesktopLifecycleRuntimeServices
+  | DesktopAssets.DesktopAssets
+  | ElectronTray.ElectronTray
   | ElectronWindow.ElectronWindow;
 
 /**
- * @effect-expect-leaking DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronWindow
+ * @effect-expect-leaking DesktopAssets | DesktopEnvironment | DesktopShutdown | DesktopState | DesktopWindow | ElectronApp | ElectronTheme | ElectronTray | ElectronWindow
  */
 export class DesktopLifecycle extends Context.Service<
   DesktopLifecycle,
@@ -57,8 +69,11 @@ export class DesktopLifecycle extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopLifecycle") {}
 
-const { logInfo: logLifecycleInfo, logError: logLifecycleError } =
-  makeComponentLogger("desktop-lifecycle");
+const {
+  logInfo: logLifecycleInfo,
+  logWarning: logLifecycleWarning,
+  logError: logLifecycleError,
+} = makeComponentLogger("desktop-lifecycle");
 
 function addScopedListener<Args extends ReadonlyArray<unknown>>(
   target: unknown,
@@ -114,7 +129,7 @@ function handleBeforeQuit(
   }
 
   event.preventDefault();
-  void runEffect(
+  const shutdown = runEffect(
     Effect.gen(function* () {
       const state = yield* DesktopState.DesktopState;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
@@ -128,7 +143,21 @@ function handleBeforeQuit(
         ),
       );
     }).pipe(Effect.withSpan("desktop.lifecycle.beforeQuit")),
-  ).finally(() => {
+  );
+  const timeout = new Promise<"timeout">((resolve) => {
+    const timer = setTimeout(() => resolve("timeout"), Duration.toMillis(BACKEND_SHUTDOWN_WAIT));
+    timer.unref?.();
+  });
+  void Promise.race([
+    shutdown.then(
+      () => "done" as const,
+      () => "done" as const,
+    ),
+    timeout,
+  ]).then((result) => {
+    if (result === "timeout") {
+      void runEffect(logLifecycleWarning("backend shutdown timed out; continuing quit"));
+    }
     markQuitAllowed();
     void runEffect(
       Effect.gen(function* () {
@@ -136,6 +165,17 @@ function handleBeforeQuit(
         yield* electronApp.quit;
       }).pipe(Effect.withSpan("desktop.lifecycle.quitAfterShutdown")),
     );
+    if (result !== "timeout") return;
+    const exitTimer = setTimeout(() => {
+      void runEffect(
+        Effect.gen(function* () {
+          const electronApp = yield* ElectronApp.ElectronApp;
+          yield* logLifecycleWarning("quit did not exit in time; forcing exit");
+          yield* electronApp.exit(0);
+        }).pipe(Effect.withSpan("desktop.lifecycle.forceExitAfterQuit")),
+      );
+    }, Duration.toMillis(FORCE_EXIT_AFTER_QUIT));
+    exitTimer.unref?.();
   });
 }
 
@@ -153,7 +193,6 @@ function quitFromSignal(
       const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
       if (wasQuitting) return;
       yield* logLifecycleInfo("process signal received", { signal });
-      yield* requestDesktopShutdownAndWait();
       yield* electronApp.quit;
     }).pipe(Effect.withSpan("desktop.lifecycle.processSignal")),
   );
@@ -188,15 +227,65 @@ export const make = DesktopLifecycle.of({
     );
   }),
   register: Effect.gen(function* () {
+    const desktopAssets = yield* DesktopAssets.DesktopAssets;
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     const electronWindow = yield* ElectronWindow.ElectronWindow;
     const electronApp = yield* ElectronApp.ElectronApp;
     const electronTheme = yield* ElectronTheme.ElectronTheme;
+    const electronTray = yield* ElectronTray.ElectronTray;
     const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    const state = yield* DesktopState.DesktopState;
     const context = yield* Effect.context<DesktopLifecycleRegistrationServices>();
     const runEffect = Effect.runPromiseWith(context);
     let quitAllowed = false;
     let updaterQuitAllowed = false;
+
+    const hideBackgroundTray = electronTray.destroy.pipe(
+      Effect.withSpan("desktop.lifecycle.hideBackgroundTray"),
+    );
+    const revealHostWindow = Effect.gen(function* () {
+      if (yield* Ref.get(state.quitting)) return;
+      yield* desktopWindow.activate;
+      yield* hideBackgroundTray;
+    }).pipe(Effect.withSpan("desktop.lifecycle.revealHostWindow"));
+    const showBackgroundTray = Effect.gen(function* () {
+      if (environment.platform !== "linux") return;
+      if (yield* Ref.get(state.quitting)) return;
+      const iconPath = Option.getOrUndefined((yield* desktopAssets.iconPaths).png);
+      if (iconPath === undefined) {
+        yield* logLifecycleWarning("linux background tray skipped because no png icon was found");
+        return;
+      }
+      yield* electronTray
+        .replace({
+          iconPath,
+          tooltip: environment.displayName,
+          template: [
+            {
+              label: "Open",
+              click: () => {
+                void runEffect(revealHostWindow);
+              },
+            },
+            { type: "separator" },
+            {
+              label: "Quit",
+              click: () => {
+                void runEffect(electronApp.quit);
+              },
+            },
+          ],
+          onClick: () => {
+            void runEffect(revealHostWindow);
+          },
+        })
+        .pipe(
+          Effect.catchCause((cause) =>
+            logLifecycleError("failed to show linux background tray", { cause }),
+          ),
+        );
+    }).pipe(Effect.withSpan("desktop.lifecycle.showBackgroundTray"));
+
     yield* electronTheme.onUpdated(() => {
       void runEffect(
         desktopWindow.syncAppearance.pipe(Effect.withSpan("desktop.lifecycle.themeUpdated")),
@@ -232,19 +321,20 @@ export const make = DesktopLifecycle.of({
       );
     });
     yield* electronApp.on("activate", () => {
-      void runEffect(
-        Effect.gen(function* () {
-          const state = yield* DesktopState.DesktopState;
-          if (yield* Ref.get(state.quitting)) return;
-          yield* desktopWindow.activate;
-        }).pipe(Effect.withSpan("desktop.lifecycle.activate")),
-      );
+      void runEffect(revealHostWindow.pipe(Effect.withSpan("desktop.lifecycle.activate")));
+    });
+    yield* electronApp.on("second-instance", () => {
+      void runEffect(revealHostWindow.pipe(Effect.withSpan("desktop.lifecycle.secondInstance")));
+    });
+    yield* electronApp.on("browser-window-created", () => {
+      void runEffect(hideBackgroundTray);
     });
     yield* electronApp.on("window-all-closed", () => {
       void runEffect(
-        logLifecycleInfo("all windows closed; desktop backend remains active").pipe(
-          Effect.withSpan("desktop.lifecycle.windowAllClosed"),
-        ),
+        Effect.gen(function* () {
+          yield* logLifecycleInfo("all windows closed; desktop backend remains active");
+          yield* showBackgroundTray;
+        }).pipe(Effect.withSpan("desktop.lifecycle.windowAllClosed")),
       );
     });
 

@@ -1,4 +1,5 @@
 import * as Cause from "effect/Cause";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -315,9 +316,11 @@ const scopedProgram = Effect.scoped(
         // finalizer means it gets hard-killed by the OS instead of
         // receiving SIGTERM + grace. Stops run concurrently.
         const instances = yield* pool.list;
-        yield* Effect.forEach(instances, (instance) => instance.stop(), {
-          concurrency: "unbounded",
-        });
+        yield* Effect.forEach(
+          instances,
+          (instance) => instance.stop({ timeout: Duration.seconds(5) }),
+          { concurrency: "unbounded" },
+        );
       }).pipe(Effect.ensuring(shutdown.markComplete)),
     );
 
