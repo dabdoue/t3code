@@ -9,10 +9,16 @@ Grok Build totals come from persisted session updates. Interactive turns that ne
 completed-turn record will not appear.
 
 The **Limits** view shows how much of each subscription window you have used on Codex, Claude
-Code, and Cursor, per connected environment. Codex and Claude Code report session and weekly
-windows, plus a per-model weekly window such as Fable when your plan has one. Cursor reports the
-two included monthly pools from its Spending page: Cursor Models (Auto, Composer, Cursor Grok) and
-Other Models (named / API). Each window is a bar from the moment it opened to its reset,
+Code, and Cursor. It unions every connected environment into one list. Machine names appear on
+each row when more than one environment is connected. The same signed-in account on two machines
+shares one set of bars, labeled with those machine names. Distinct accounts stay on their own
+rows. A connected machine that has not reported quota yet still appears, either merged into the
+matching account or with a note that its windows are missing. Refresh re-probes every connected
+environment. Codex and Claude
+Code report session and weekly windows, plus a per-model weekly window such as Fable when your
+plan has one. Cursor reports the two included monthly pools from its Spending page: Cursor
+Models (Auto, Composer, Cursor Grok) and Other Models (named / API). Each window is a bar from
+the moment it opened to its reset,
 filled by the share of quota spent; a thin line marks how far into the window you are, which is
 also where even spending would have put the fill, and the icon beside the label says whether you
 are ahead of, on, or under that pace. Hover a bar for the exact reset time. Limits refresh on the

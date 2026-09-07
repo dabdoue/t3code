@@ -240,20 +240,16 @@ export const make = DesktopLifecycle.of({
     let quitAllowed = false;
     let updaterQuitAllowed = false;
 
-    const hideBackgroundTray = electronTray.destroy.pipe(
-      Effect.withSpan("desktop.lifecycle.hideBackgroundTray"),
-    );
     const revealHostWindow = Effect.gen(function* () {
       if (yield* Ref.get(state.quitting)) return;
       yield* desktopWindow.activate;
-      yield* hideBackgroundTray;
     }).pipe(Effect.withSpan("desktop.lifecycle.revealHostWindow"));
-    const showBackgroundTray = Effect.gen(function* () {
+    const showLinuxTray = Effect.gen(function* () {
       if (environment.platform !== "linux") return;
       if (yield* Ref.get(state.quitting)) return;
       const iconPath = Option.getOrUndefined((yield* desktopAssets.iconPaths).png);
       if (iconPath === undefined) {
-        yield* logLifecycleWarning("linux background tray skipped because no png icon was found");
+        yield* logLifecycleWarning("linux tray skipped because no png icon was found");
         return;
       }
       yield* electronTray
@@ -262,7 +258,7 @@ export const make = DesktopLifecycle.of({
           tooltip: environment.displayName,
           template: [
             {
-              label: "Open",
+              label: "Show window",
               click: () => {
                 void runEffect(revealHostWindow);
               },
@@ -280,11 +276,9 @@ export const make = DesktopLifecycle.of({
           },
         })
         .pipe(
-          Effect.catchCause((cause) =>
-            logLifecycleError("failed to show linux background tray", { cause }),
-          ),
+          Effect.catchCause((cause) => logLifecycleError("failed to show linux tray", { cause })),
         );
-    }).pipe(Effect.withSpan("desktop.lifecycle.showBackgroundTray"));
+    }).pipe(Effect.withSpan("desktop.lifecycle.showLinuxTray"));
 
     yield* electronTheme.onUpdated(() => {
       void runEffect(
@@ -326,17 +320,14 @@ export const make = DesktopLifecycle.of({
     yield* electronApp.on("second-instance", () => {
       void runEffect(revealHostWindow.pipe(Effect.withSpan("desktop.lifecycle.secondInstance")));
     });
-    yield* electronApp.on("browser-window-created", () => {
-      void runEffect(hideBackgroundTray);
-    });
     yield* electronApp.on("window-all-closed", () => {
       void runEffect(
-        Effect.gen(function* () {
-          yield* logLifecycleInfo("all windows closed; desktop backend remains active");
-          yield* showBackgroundTray;
-        }).pipe(Effect.withSpan("desktop.lifecycle.windowAllClosed")),
+        logLifecycleInfo("all windows closed; desktop backend remains active").pipe(
+          Effect.withSpan("desktop.lifecycle.windowAllClosed"),
+        ),
       );
     });
+    yield* showLinuxTray;
 
     if (environment.platform !== "win32") {
       yield* addScopedListener(process, "SIGINT", () => {

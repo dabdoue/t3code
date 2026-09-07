@@ -20,50 +20,158 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 
 /**
- * Providers that belong on the Limits view: enabled, installed, and one whose
- * driver reports subscription usage at all. A driver with no notion of usage
- * never sets `usageLimits`, so it has no row rather than an empty one.
+ * Providers that belong on the Limits view: enabled, installed, and either
+ * already reporting subscription usage or the same driver as one that does.
+ * A remote Codex/Cursor/Claude with no `usageLimits` yet still joins the
+ * union once any connected environment has probed that driver.
  */
 export function providersWithLimits(
   providers: readonly ServerProvider[],
+  capableDrivers?: ReadonlySet<ServerProvider["driver"]>,
 ): readonly ServerProvider[] {
   return providers.filter(
     (provider) =>
       provider.enabled &&
       provider.installed &&
       isProviderAvailable(provider) &&
-      provider.usageLimits !== undefined,
+      (provider.usageLimits !== undefined || Boolean(capableDrivers?.has(provider.driver))),
   );
 }
 
-export interface LimitsGroup {
+function capableLimitsDrivers(
+  presentations: ReadonlyMap<EnvironmentId, LimitsPresentation>,
+): ReadonlySet<ServerProvider["driver"]> {
+  const drivers = new Set<ServerProvider["driver"]>();
+  for (const presentation of presentations.values()) {
+    for (const provider of presentation.serverConfig?.providers ?? []) {
+      if (
+        provider.enabled &&
+        provider.installed &&
+        isProviderAvailable(provider) &&
+        provider.usageLimits !== undefined
+      ) {
+        drivers.add(provider.driver);
+      }
+    }
+  }
+  return drivers;
+}
+
+export interface LimitsAccountPresence {
   readonly environmentId: EnvironmentId;
-  /** Null while only one environment is connected; there is nothing to tell apart. */
-  readonly environmentLabel: string | null;
-  readonly providers: readonly ServerProvider[];
+  readonly environmentLabel: string;
 }
 
 /**
- * One group per connected environment with a provider reporting limits.
- * Provider snapshots come from the config stream every client already holds,
- * so opening the view costs no extra request.
+ * One subscription on the Limits view. The same driver and signed-in email
+ * across machines share a row; unidentified accounts stay per instance.
  */
-export function collectLimitsGroups(
-  presentations: ReadonlyMap<
-    EnvironmentId,
-    {
-      readonly entry: { readonly target: { readonly label: string } };
-      readonly serverConfig: { readonly providers: readonly ServerProvider[] } | null;
-    }
-  >,
-): readonly LimitsGroup[] {
-  const groups: LimitsGroup[] = [];
+export interface LimitsAccount {
+  readonly key: string;
+  /** Environment that owns the preferred snapshot, used to redeem reset credits. */
+  readonly environmentId: EnvironmentId;
+  readonly provider: ServerProvider;
+  readonly presence: readonly LimitsAccountPresence[];
+  /** Machine names when more than one environment is connected. */
+  readonly presenceLabel: string | null;
+}
+
+type LimitsPresentation = {
+  readonly entry: { readonly target: { readonly label: string } };
+  readonly serverConfig: { readonly providers?: readonly ServerProvider[] | undefined } | null;
+};
+
+/**
+ * Union of provider snapshots across connected environments. Provider
+ * snapshots come from the config stream every client already holds, so
+ * opening the view costs no extra request.
+ */
+export function collectLimitsAccounts(
+  presentations: ReadonlyMap<EnvironmentId, LimitsPresentation>,
+): readonly LimitsAccount[] {
+  type Draft = {
+    readonly key: string;
+    environmentId: EnvironmentId;
+    provider: ServerProvider;
+    readonly presence: LimitsAccountPresence[];
+  };
+  const byKey = new Map<string, Draft>();
+  const order: string[] = [];
+  const capableDrivers = capableLimitsDrivers(presentations);
+
   for (const [environmentId, presentation] of presentations) {
-    const providers = providersWithLimits(presentation.serverConfig?.providers ?? []);
-    if (providers.length === 0) continue;
-    groups.push({ environmentId, environmentLabel: presentation.entry.target.label, providers });
+    const environmentLabel = presentation.entry.target.label;
+    for (const provider of providersWithLimits(
+      presentation.serverConfig?.providers ?? [],
+      capableDrivers,
+    )) {
+      const key =
+        accountKey(provider.driver, provider.auth.email) ??
+        `${environmentId}:${provider.instanceId}`;
+      const existing = byKey.get(key);
+      if (existing === undefined) {
+        byKey.set(key, {
+          key,
+          environmentId,
+          provider,
+          presence: [{ environmentId, environmentLabel }],
+        });
+        order.push(key);
+        continue;
+      }
+      const preferred = preferProvider(existing.provider, provider);
+      if (preferred !== existing.provider) {
+        existing.provider = preferred;
+        existing.environmentId = environmentId;
+      }
+      if (!existing.presence.some((item) => item.environmentId === environmentId)) {
+        existing.presence.push({ environmentId, environmentLabel });
+      }
+    }
   }
-  return groups.length > 1 ? groups : groups.map((group) => ({ ...group, environmentLabel: null }));
+
+  const labelEnvironments = presentations.size > 1;
+
+  return order.flatMap((key) => {
+    const draft = byKey.get(key);
+    if (draft === undefined) return [];
+    return [
+      {
+        key: draft.key,
+        environmentId: draft.environmentId,
+        provider: draft.provider,
+        presence: draft.presence,
+        presenceLabel: formatPresenceLabel(draft.presence, labelEnvironments),
+      },
+    ];
+  });
+}
+
+function usableLimits(limits: ServerProvider["usageLimits"]): boolean {
+  return Boolean(limits && limits.windows.length > 0 && limits.unavailable === undefined);
+}
+
+function limitsCheckedAt(limits: ServerProvider["usageLimits"]): number {
+  return Date.parse(limits?.checkedAt ?? "") || 0;
+}
+
+/** Prefer a usable snapshot, then one with more reset credits, then the freshest check. */
+function preferProvider(left: ServerProvider, right: ServerProvider): ServerProvider {
+  const leftUsable = usableLimits(left.usageLimits);
+  const rightUsable = usableLimits(right.usageLimits);
+  if (leftUsable !== rightUsable) return leftUsable ? left : right;
+  const leftCredits = left.usageLimits?.resetCredits?.availableCount ?? -1;
+  const rightCredits = right.usageLimits?.resetCredits?.availableCount ?? -1;
+  if (leftCredits !== rightCredits) return leftCredits > rightCredits ? left : right;
+  return limitsCheckedAt(right.usageLimits) > limitsCheckedAt(left.usageLimits) ? right : left;
+}
+
+function formatPresenceLabel(
+  presence: readonly LimitsAccountPresence[],
+  labelEnvironments: boolean,
+): string | null {
+  if (!labelEnvironments && presence.length < 2) return null;
+  return presence.map((item) => item.environmentLabel).join(" · ");
 }
 
 /**
@@ -151,7 +259,10 @@ export function providerLimitsLabel(
 }
 
 /** The one-line status under a provider heading when there are no bars to draw. */
-export function limitsNotice(limits: ServerProviderUsageLimits): string | null {
+export function limitsNotice(limits: ServerProviderUsageLimits | undefined): string | null {
+  if (limits === undefined) {
+    return "This machine has not reported subscription windows.";
+  }
   if (limits.unavailable?.reason === "unsupported") {
     return limits.unavailable.message ?? "This account has no subscription limits.";
   }

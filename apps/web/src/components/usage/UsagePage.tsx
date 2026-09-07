@@ -6,7 +6,6 @@ import type { DailyTotals, HourlyTotals } from "@t3tools/shared/usageMerge";
 
 import { isElectron } from "../../env";
 import { cn } from "../../lib/utils";
-import { usePrimaryEnvironmentId } from "../../state/environments";
 import { serverEnvironment } from "../../state/server";
 import { useUsage, type EnvironmentUsageStatus } from "../../state/usage";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -67,7 +66,6 @@ export function UsagePage() {
   const { days: windowDays, window } = windowSelection;
   const isPast24Hours = windowDays === 1;
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
@@ -113,12 +111,11 @@ export function UsagePage() {
     });
   };
   const refreshWindow = () => {
-    // On Limits the button re-probes every provider (and usage-limit source)
-    // on the primary environment; the live snapshots then flow in over the
-    // config stream, so nothing else needs to move.
+    // On Limits the button re-probes every connected environment; live
+    // snapshots then flow in over each config stream.
     if (showingLimits) {
-      if (primaryEnvironmentId) {
-        void refreshProviders({ environmentId: primaryEnvironmentId, input: {} });
+      for (const environment of environments) {
+        void refreshProviders({ environmentId: environment.environmentId, input: {} });
       }
       return;
     }

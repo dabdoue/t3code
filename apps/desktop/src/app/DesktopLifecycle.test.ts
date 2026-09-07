@@ -75,11 +75,12 @@ const desktopAssetsLayer = Layer.succeed(DesktopAssets.DesktopAssets, {
   resolveResourcePath: () => Effect.succeed(Option.none()),
 });
 
-function makeElectronTrayLayer(calls: { replace: number; destroy: number }) {
+function makeElectronTrayLayer(calls: { replace: number; destroy: number; onClick?: () => void }) {
   return Layer.succeed(ElectronTray.ElectronTray, {
-    replace: () =>
+    replace: (input) =>
       Effect.sync(() => {
         calls.replace += 1;
+        calls.onClick = input.onClick;
       }),
     destroy: Effect.sync(() => {
       calls.destroy += 1;
@@ -323,7 +324,7 @@ describe("DesktopLifecycle", () => {
           yield* Effect.yieldNow;
 
           assert.equal(activationCount, 1);
-          assert.equal(trayCalls.destroy, 1);
+          assert.equal(trayCalls.destroy, 0);
         }),
       ).pipe(
         Effect.provide(
@@ -338,29 +339,66 @@ describe("DesktopLifecycle", () => {
     }),
   );
 
-  it.effect("shows a linux tray after every window closes and hides it when a window returns", () =>
+  it.effect(
+    "shows a linux tray while the window is open and keeps it after the window closes",
+    () =>
+      Effect.gen(function* () {
+        const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
+        const trayCalls = { replace: 0, destroy: 0 };
+
+        yield* Effect.scoped(
+          Effect.gen(function* () {
+            const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
+            yield* lifecycle.register;
+            assert.equal(trayCalls.replace, 1);
+
+            appListeners.get("window-all-closed")?.();
+            yield* Effect.yieldNow;
+            assert.equal(trayCalls.replace, 1);
+            assert.equal(trayCalls.destroy, 0);
+          }),
+        ).pipe(
+          Effect.provide(
+            makeLifecycleLayer({
+              appListeners,
+              platform: "linux",
+              trayCalls,
+            }),
+          ),
+        );
+      }),
+  );
+
+  it.effect("linux tray click focuses the window without removing the tray", () =>
     Effect.gen(function* () {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
-      const trayCalls = { replace: 0, destroy: 0 };
+      let activationCount = 0;
+      const activate = Effect.sync(() => {
+        activationCount += 1;
+      });
+      const trayCalls: { replace: number; destroy: number; onClick?: () => void } = {
+        replace: 0,
+        destroy: 0,
+      };
 
       yield* Effect.scoped(
         Effect.gen(function* () {
           const lifecycle = yield* DesktopLifecycle.DesktopLifecycle;
           yield* lifecycle.register;
-
-          appListeners.get("window-all-closed")?.();
-          yield* Effect.yieldNow;
           assert.equal(trayCalls.replace, 1);
 
-          appListeners.get("browser-window-created")?.();
+          trayCalls.onClick?.();
           yield* Effect.yieldNow;
-          assert.equal(trayCalls.destroy, 1);
+
+          assert.equal(activationCount, 1);
+          assert.equal(trayCalls.destroy, 0);
         }),
       ).pipe(
         Effect.provide(
           makeLifecycleLayer({
             appListeners,
             platform: "linux",
+            activate,
             trayCalls,
           }),
         ),
@@ -368,7 +406,7 @@ describe("DesktopLifecycle", () => {
     }),
   );
 
-  it.effect("does not show a background tray on macOS after every window closes", () =>
+  it.effect("does not show a linux tray on macOS", () =>
     Effect.gen(function* () {
       const appListeners = new Map<string, (...args: readonly unknown[]) => void>();
       const trayCalls = { replace: 0, destroy: 0 };

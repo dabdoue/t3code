@@ -72,11 +72,12 @@ yay -S t3code-nightly-bin
 ### Closing the window
 
 If you close the last window, the desktop app keeps its local server running so
-other devices can stay connected. On Linux a tray icon appears while the window
-is gone: choose **Open** to bring the UI back, or **Quit** to stop the app and
-its server. **File → Quit**, the quit shortcut, and a dock or tray **Quit** that
-reaches the app also stop everything. Clicking the app icon, or launching it
-again, reopens the window on the still-running server.
+other devices can stay connected. On Linux a tray icon stays in the panel
+whether the window is open or not: click it to focus the window, or right-click
+for **Show window** and **Quit**. **Quit** stops the app and its server.
+**File → Quit**, the quit shortcut, and a dock or tray **Quit** that reaches the
+app also stop everything. Clicking the app icon, or launching it again, reopens
+the window on the still-running server.
 
 For a server that should keep running after logout, use the
 [background service](./background-service.md) instead of leaving the desktop app

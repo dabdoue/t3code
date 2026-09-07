@@ -10,7 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   collectLimitSources,
-  collectLimitsGroups,
+  collectLimitsAccounts,
   elapsedShare,
   formatResetsIn,
   limitsNotice,
@@ -75,6 +75,7 @@ describe("limitsNotice", () => {
   it("explains empty bars and passes provider messages through", () => {
     const checkedAt = "2026-09-03T11:00:00.000Z";
     expect(limitsNotice({ checkedAt, windows: [window] })).toBeNull();
+    expect(limitsNotice(undefined)).toBe("This machine has not reported subscription windows.");
     expect(limitsNotice({ checkedAt, windows: [] })).toBe("No limits reported.");
     expect(limitsNotice({ checkedAt, windows: [], unavailable: { reason: "unsupported" } })).toBe(
       "This account has no subscription limits.",
@@ -126,29 +127,172 @@ describe("providersWithLimits", () => {
   });
 });
 
-describe("collectLimitsGroups", () => {
-  it("labels environments only when more than one reports limits", () => {
-    const limits = { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] };
-    const codex = provider({ usageLimits: limits });
+describe("collectLimitsAccounts", () => {
+  const limits = { checkedAt: "2026-09-03T11:00:00.000Z", windows: [window] };
+  const email = "person@example.com";
+
+  it("omits machine names when only one environment is connected", () => {
+    const signedIn = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
     const one = new Map([
-      ["env-a", { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [codex] } }],
       [
-        "env-b",
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [signedIn] } },
+      ],
+    ]);
+    expect(collectLimitsAccounts(one).map((account) => account.presenceLabel)).toEqual([null]);
+  });
+
+  it("names machines whenever more than one environment is connected", () => {
+    const signedIn = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
+    const two = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [signedIn] } },
+      ],
+      [
+        EnvironmentId.make("env-b"),
         { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [provider({})] } },
       ],
-    ] as const);
-    expect(collectLimitsGroups(one as never).map((group) => group.environmentLabel)).toEqual([
-      null,
     ]);
+    expect(
+      collectLimitsAccounts(two).map((account) => [
+        account.provider.auth.email,
+        account.presenceLabel,
+      ]),
+    ).toEqual([
+      [email, "Laptop"],
+      [undefined, "Desktop"],
+    ]);
+  });
 
+  it("merges a remote copy of the same email even when that machine has not probed quota", () => {
+    const laptop = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
+    const desktop = provider({
+      instanceId: ProviderInstanceId.make("codex-desktop"),
+      auth: { status: "authenticated", email },
+    });
     const two = new Map([
-      ["env-a", { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [codex] } }],
-      ["env-b", { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [codex] } }],
-    ] as const);
-    expect(collectLimitsGroups(two as never).map((group) => group.environmentLabel)).toEqual([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [laptop] } },
+      ],
+      [
+        EnvironmentId.make("env-b"),
+        { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [desktop] } },
+      ],
+    ]);
+    const accounts = collectLimitsAccounts(two);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.presenceLabel).toBe("Laptop · Desktop");
+    expect(accounts[0]?.provider).toBe(laptop);
+    expect(accounts[0]?.provider.usageLimits).toEqual(limits);
+  });
+
+  it("merges the same signed-in account across machines into one shared row", () => {
+    const laptop = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
+    const desktop = provider({
+      instanceId: ProviderInstanceId.make("codex-desktop"),
+      auth: { status: "authenticated", email: " Person@Example.COM " },
+      usageLimits: { ...limits, checkedAt: "2026-09-03T11:05:00.000Z" },
+    });
+    const two = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [laptop] } },
+      ],
+      [
+        EnvironmentId.make("env-b"),
+        { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [desktop] } },
+      ],
+    ]);
+    const accounts = collectLimitsAccounts(two);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.presenceLabel).toBe("Laptop · Desktop");
+    expect(accounts[0]?.provider).toBe(desktop);
+    expect(accounts[0]?.environmentId).toBe(EnvironmentId.make("env-b"));
+  });
+
+  it("keeps distinct emails as distinct rows and names each machine", () => {
+    const laptop = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
+    const desktop = provider({
+      instanceId: ProviderInstanceId.make("codex-work"),
+      auth: { status: "authenticated", email: "work@example.com" },
+      usageLimits: limits,
+    });
+    const two = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [laptop] } },
+      ],
+      [
+        EnvironmentId.make("env-b"),
+        { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [desktop] } },
+      ],
+    ]);
+    expect(
+      collectLimitsAccounts(two).map((account) => [
+        account.provider.auth.email,
+        account.presenceLabel,
+      ]),
+    ).toEqual([
+      [email, "Laptop"],
+      ["work@example.com", "Desktop"],
+    ]);
+  });
+
+  it("does not merge unidentified accounts across machines", () => {
+    const unnamed = provider({ usageLimits: limits });
+    const two = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [unnamed] } },
+      ],
+      [
+        EnvironmentId.make("env-b"),
+        { entry: { target: { label: "Desktop" } }, serverConfig: { providers: [unnamed] } },
+      ],
+    ]);
+    expect(collectLimitsAccounts(two).map((account) => account.presenceLabel)).toEqual([
       "Laptop",
       "Desktop",
     ]);
+  });
+
+  it("merges two instances of the same email on one machine and prefers reset credits", () => {
+    const first = provider({
+      auth: { status: "authenticated", email },
+      usageLimits: limits,
+    });
+    const second = provider({
+      instanceId: ProviderInstanceId.make("work"),
+      auth: { status: "authenticated", email },
+      usageLimits: { ...limits, resetCredits: { availableCount: 2 } },
+    });
+    const input = new Map([
+      [
+        EnvironmentId.make("env-a"),
+        { entry: { target: { label: "Laptop" } }, serverConfig: { providers: [first, second] } },
+      ],
+    ]);
+    const accounts = collectLimitsAccounts(input);
+    expect(accounts).toHaveLength(1);
+    expect(accounts[0]?.presenceLabel).toBeNull();
+    expect(accounts[0]?.provider).toBe(second);
   });
 });
 
@@ -199,7 +343,7 @@ describe("collectLimitSources", () => {
       const input = presentations([first, second], accounts);
 
       expect(collectLimitSources(input)).toMatchObject([{ accounts: [], hiddenAccountCount: 1 }]);
-      expect(collectLimitsGroups(input)[0]?.providers).toEqual([first, second]);
+      expect(collectLimitsAccounts(input).map((entry) => entry.provider)).toEqual([first]);
       expect(accounts).toHaveLength(1);
       expect(first.usageLimits?.resetCredits?.availableCount).toBe(2);
     },

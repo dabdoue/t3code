@@ -10,7 +10,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   collectLimitSources,
-  collectLimitsGroups,
+  collectLimitsAccounts,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -80,6 +80,7 @@ function WindowBar(props: { readonly window: ServerProviderUsageWindow; readonly
 function AccountLimits(props: {
   readonly label: string;
   readonly instanceLabel: string;
+  readonly presenceLabel: string | null;
   readonly detail: string | undefined;
   readonly limits: ServerProvider["usageLimits"];
   readonly now: number;
@@ -87,7 +88,6 @@ function AccountLimits(props: {
   readonly footer?: ReactNode;
 }) {
   const { limits, now } = props;
-  if (!limits) return null;
   const notice = limitsNotice(limits);
   return (
     <View className={props.first ? "gap-3 p-4" : "gap-3 border-t border-border-subtle p-4"}>
@@ -96,6 +96,9 @@ function AccountLimits(props: {
         {props.instanceLabel !== props.label ? (
           <Text className="shrink text-xs text-foreground-tertiary">· {props.instanceLabel}</Text>
         ) : null}
+        {props.presenceLabel ? (
+          <Text className="shrink text-xs text-foreground-tertiary">· {props.presenceLabel}</Text>
+        ) : null}
         {props.detail ? (
           <Text className="shrink text-sm text-foreground-muted">· {props.detail}</Text>
         ) : null}
@@ -103,7 +106,9 @@ function AccountLimits(props: {
       {notice ? (
         <Text className="text-sm text-foreground-muted">{notice}</Text>
       ) : (
-        limits.windows.map((window) => <WindowBar key={window.id} window={window} now={now} />)
+        (limits?.windows ?? []).map((window) => (
+          <WindowBar key={window.id} window={window} now={now} />
+        ))
       )}
       {props.footer}
     </View>
@@ -197,6 +202,7 @@ function ResetCredits(props: {
 function ProviderLimits(props: {
   readonly provider: ServerProvider;
   readonly environmentId: EnvironmentId;
+  readonly presenceLabel: string | null;
   readonly now: number;
   readonly first: boolean;
 }) {
@@ -206,6 +212,7 @@ function ProviderLimits(props: {
     <AccountLimits
       label={DRIVER_LABEL[provider.driver] ?? String(provider.driver)}
       instanceLabel={providerLimitsLabel(provider, (driver) => DRIVER_LABEL[driver])}
+      presenceLabel={props.presenceLabel}
       detail={provider.auth.label}
       limits={provider.usageLimits}
       now={now}
@@ -235,6 +242,7 @@ function SourceAccountLimits(props: {
     <AccountLimits
       label={DRIVER_LABEL[account.driver] ?? String(account.driver)}
       instanceLabel="CLI Proxy"
+      presenceLabel={null}
       detail={account.plan}
       limits={account.usageLimits}
       now={props.now}
@@ -245,19 +253,36 @@ function SourceAccountLimits(props: {
 
 /**
  * Subscription quota windows from every connected environment's providers,
- * read from the config each environment already streams. Countdowns anchor to
- * render time rather than ticking.
+ * unioned by signed-in account and read from the config each environment
+ * already streams. Countdowns anchor to render time rather than ticking.
  */
 export function UsageLimitsSection() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const groups = collectLimitsGroups(presentations);
+  const accounts = collectLimitsAccounts(presentations);
   const sources = collectLimitSources(presentations);
   // Anchored once per mount on purpose: countdowns must not tick.
   const [now] = useState(() => Date.now());
-  if (groups.length === 0 && sources.length === 0) return null;
+  const missingMachines =
+    presentations.size < 2
+      ? []
+      : [...presentations]
+          .filter(
+            ([environmentId]) =>
+              !accounts.some((account) =>
+                account.presence.some((item) => item.environmentId === environmentId),
+              ),
+          )
+          .map(([, presentation]) => presentation.entry.target.label);
+  if (accounts.length === 0 && sources.length === 0) return null;
 
   return (
     <>
+      {missingMachines.length > 0 ? (
+        <Text className="px-4 pb-2 text-xs text-foreground-muted">
+          {missingMachines.join(", ")} {missingMachines.length === 1 ? "is" : "are"} connected but
+          {missingMachines.length === 1 ? " has" : " have"} not reported a provider with quota.
+        </Text>
+      ) : null}
       {sources.map((source) => (
         <SettingsSection key={source.key} card>
           {source.error ? (
@@ -280,23 +305,20 @@ export function UsageLimitsSection() {
           )}
         </SettingsSection>
       ))}
-      {groups.map((group) => (
-        <SettingsSection
-          key={group.environmentId}
-          title={group.environmentLabel ? `Limits · ${group.environmentLabel}` : "Limits"}
-          card
-        >
-          {group.providers.map((provider, index) => (
+      {accounts.length > 0 ? (
+        <SettingsSection title="Limits" card>
+          {accounts.map((account, index) => (
             <ProviderLimits
-              key={provider.instanceId}
-              provider={provider}
-              environmentId={group.environmentId}
+              key={account.key}
+              provider={account.provider}
+              environmentId={account.environmentId}
+              presenceLabel={account.presenceLabel}
               now={now}
               first={index === 0}
             />
           ))}
         </SettingsSection>
-      ))}
+      ) : null}
     </>
   );
 }

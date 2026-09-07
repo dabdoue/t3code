@@ -11,7 +11,7 @@ import {
 import { useAtomValue } from "@effect/atom-react";
 import {
   collectLimitSources,
-  collectLimitsGroups,
+  collectLimitsAccounts,
   elapsedShare,
   formatDuration,
   formatResetsIn,
@@ -209,6 +209,7 @@ function AccountHeading({
   driver,
   label,
   instanceLabel,
+  presenceLabel,
   plan,
   email,
   accentColor,
@@ -216,6 +217,7 @@ function AccountHeading({
   readonly driver: ServerProvider["driver"];
   readonly label: string;
   readonly instanceLabel: string;
+  readonly presenceLabel: string | null;
   readonly plan: string | undefined;
   readonly email: string | undefined;
   readonly accentColor?: string | undefined;
@@ -237,6 +239,11 @@ function AccountHeading({
           · {instanceLabel}
         </span>
       ) : null}
+      {presenceLabel ? (
+        <span className="min-w-0 truncate text-xs font-normal text-muted-foreground">
+          · {presenceLabel}
+        </span>
+      ) : null}
       {plan ? <span className="font-normal text-muted-foreground">· {plan}</span> : null}
       {email ? (
         <RedactedSensitiveText
@@ -253,14 +260,15 @@ function AccountHeading({
 function ProviderLimits({
   provider,
   environmentId,
+  presenceLabel,
   now,
 }: {
   readonly provider: ServerProvider;
   readonly environmentId: EnvironmentId;
+  readonly presenceLabel: string | null;
   readonly now: number;
 }) {
   const limits = provider.usageLimits;
-  if (!limits) return null;
   const notice = limitsNotice(limits);
   return (
     <section className="flex flex-col gap-3">
@@ -268,16 +276,17 @@ function ProviderLimits({
         driver={provider.driver}
         label={getDriverOption(provider.driver)?.label ?? String(provider.driver)}
         instanceLabel={providerLimitsLabel(provider, (driver) => getDriverOption(driver)?.label)}
+        presenceLabel={presenceLabel}
         plan={provider.auth.label}
         email={provider.auth.email}
         accentColor={provider.accentColor}
       />
       {notice ? (
         <span className="text-xs text-muted-foreground">{notice}</span>
-      ) : (
+      ) : limits ? (
         <LimitWindows driver={provider.driver} windows={limits.windows} now={now} />
-      )}
-      {limits.resetCredits ? (
+      ) : null}
+      {limits?.resetCredits ? (
         <ResetCredits
           environmentId={environmentId}
           instanceId={provider.instanceId}
@@ -389,6 +398,7 @@ function SourceAccountLimits({
         driver={account.driver}
         label={getDriverOption(account.driver)?.label ?? String(account.driver)}
         instanceLabel={sourceKind}
+        presenceLabel={null}
         plan={account.plan}
         email={account.email}
       />
@@ -430,43 +440,53 @@ function SourceLimits({ source, now }: { readonly source: LimitsSource; readonly
 }
 
 /**
- * Subscription quota windows from every connected environment's providers.
- * Countdowns anchor to render time rather than ticking: a live clock would
- * repaint the page every minute for no decision-changing gain.
+ * Subscription quota windows from every connected environment's providers,
+ * unioned by signed-in account. Countdowns anchor to render time rather than
+ * ticking: a live clock would repaint the page every minute for no
+ * decision-changing gain.
  */
 export function UsageLimitsSection() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
-  const groups = collectLimitsGroups(presentations);
+  const accounts = collectLimitsAccounts(presentations);
   const sources = collectLimitSources(presentations);
   // Anchored once per mount on purpose: countdowns must not tick (see below).
   const [now] = useState(() => Date.now());
+  const missingMachines =
+    presentations.size < 2
+      ? []
+      : [...presentations]
+          .filter(
+            ([environmentId]) =>
+              !accounts.some((account) =>
+                account.presence.some((item) => item.environmentId === environmentId),
+              ),
+          )
+          .map(([, presentation]) => presentation.entry.target.label);
 
   return (
     <div className="flex flex-col gap-8">
-      {groups.length === 0 && sources.length === 0 ? (
+      {accounts.length === 0 && sources.length === 0 ? (
         <p className="text-sm text-muted-foreground">
           No provider on a connected environment reports subscription limits.
+        </p>
+      ) : null}
+      {missingMachines.length > 0 ? (
+        <p className="text-xs text-muted-foreground">
+          {missingMachines.join(", ")} {missingMachines.length === 1 ? "is" : "are"} connected but
+          {missingMachines.length === 1 ? " has" : " have"} not reported a provider with quota.
         </p>
       ) : null}
       {sources.map((source) => (
         <SourceLimits key={source.key} source={source} now={now} />
       ))}
-      {groups.map((group) => (
-        <div key={group.environmentId} className="flex flex-col gap-6">
-          {group.environmentLabel ? (
-            <h2 className="text-xs tracking-wide text-muted-foreground uppercase">
-              {group.environmentLabel}
-            </h2>
-          ) : null}
-          {group.providers.map((provider) => (
-            <ProviderLimits
-              key={provider.instanceId}
-              provider={provider}
-              environmentId={group.environmentId}
-              now={now}
-            />
-          ))}
-        </div>
+      {accounts.map((account) => (
+        <ProviderLimits
+          key={account.key}
+          provider={account.provider}
+          environmentId={account.environmentId}
+          presenceLabel={account.presenceLabel}
+          now={now}
+        />
       ))}
     </div>
   );
