@@ -69,11 +69,12 @@ export function isForkUpdateScriptSource(contents: string): boolean {
 }
 
 /**
- * Refs that may contain the updater. The SHA being installed often predates
- * the script, so look at the client's own revision and known branches first.
+ * Refs that may contain the updater. Known branches first so a pushed script
+ * wins over an older baked client SHA. The SHA being installed is last because
+ * it often predates the script.
  */
 export function forkUpdateScriptLookupRefs(sha: string, scriptRevision?: string): string[] {
-  return uniqueNonEmpty([scriptRevision, ...FORK_UPDATE_SCRIPT_REFS, sha]);
+  return uniqueNonEmpty([...FORK_UPDATE_SCRIPT_REFS, scriptRevision, sha]);
 }
 
 export interface ForkServerUpdateCommandOptions {

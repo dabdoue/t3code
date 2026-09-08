@@ -68,7 +68,12 @@ describe("forkRevision", () => {
     expect(manual).toContain(sha);
     expect(forkServerUpdateCommand("not-a-sha")).toBeNull();
     expect(isForkUpdateScriptSource("resolve_appimage\nT3CODE_FORK_CLONE")).toBe(true);
-    expect(forkUpdateScriptLookupRefs(sha, scriptRevision)[0]).toBe(scriptRevision);
+    expect(forkUpdateScriptLookupRefs(sha, scriptRevision)[0]).toBe(FORK_UPDATE_SCRIPT_REFS[0]);
+    expect(forkUpdateScriptLookupRefs(sha, scriptRevision)).toEqual([
+      ...FORK_UPDATE_SCRIPT_REFS,
+      scriptRevision,
+      sha,
+    ]);
     expect(forkUpdateScriptLookupRefs(sha)).toEqual([...FORK_UPDATE_SCRIPT_REFS, sha]);
     NodeChildProcess.execFileSync("bash", ["-n", "-c", command ?? ""], { encoding: "utf8" });
   });

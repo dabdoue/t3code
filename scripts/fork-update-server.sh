@@ -183,6 +183,12 @@ if [[ "$restart_only" -eq 0 ]]; then
   git -C "$clone" checkout --force --detach FETCH_HEAD
   git -C "$clone" rev-parse --verify --quiet HEAD >/dev/null
 
+  # GitHub clones have no `.env`. Copy the public T3 Connect identifiers from
+  # `.env.example` so remote AppImages keep Clerk/relay, matching official builds.
+  if [[ ! -f "$clone/.env" && -f "$clone/.env.example" ]]; then
+    cp "$clone/.env.example" "$clone/.env"
+  fi
+
   if [[ ! -f "$clone/scripts/build-desktop-artifact.ts" ]]; then
     echo "not a T3 Code checkout: $clone" >&2
     exit 1

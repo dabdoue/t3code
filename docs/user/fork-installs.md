@@ -16,7 +16,8 @@ When this client and that Linux server disagree on fork git SHA, T3 Code shows *
 
 Select the button. T3 Code uses the connection you already have: the same WebSocket path official
 **Update** uses. That machine installs this fork at this client's git SHA and restarts. Finish
-agent work first. Saved threads and `~/.t3/userdata` are left alone.
+agent work first. Saved threads and `~/.t3/userdata` are left alone. T3 Connect sign-in stays
+enabled; the new build uses the same public cloud identifiers as official T3.
 
 If that automatic update fails, **Copy update command** appears. Paste it in a terminal on the
 server machine. It works from any directory and finds the existing T3 install itself.
