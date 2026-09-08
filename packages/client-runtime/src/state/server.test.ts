@@ -404,6 +404,35 @@ describe("server state projection", () => {
     ).toBe(true);
   });
 
+  it("treats a matching forkRevision as the resumed target when the SHA stays the same semver", () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    const ready = {
+      version: 1 as const,
+      sequence: 1,
+      type: "ready" as const,
+      payload: {
+        at: "2026-09-07T00:00:00.000Z",
+        environment: { serverVersion: "0.0.38", forkRevision: sha },
+      },
+    } as Parameters<typeof matchesServerUpdateReadyEvent>[1];
+
+    expect(
+      matchesServerUpdateReadyEvent({ targetVersion: sha, method: "desktop-app" }, ready),
+    ).toBe(true);
+    expect(
+      matchesServerUpdateReadyEvent({ targetVersion: sha, method: "desktop-app" }, {
+        ...ready,
+        payload: {
+          ...ready.payload,
+          environment: {
+            ...ready.payload.environment,
+            forkRevision: "fedcba9876543210fedcba9876543210fedcba98",
+          },
+        },
+      } as Parameters<typeof matchesServerUpdateReadyEvent>[1]),
+    ).toBe(false);
+  });
+
   it("applies every config category to the projected snapshot", () => {
     const snapshot = applyServerConfigProjection(Option.none(), {
       version: 1,

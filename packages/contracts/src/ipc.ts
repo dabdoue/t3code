@@ -389,6 +389,23 @@ export const DesktopSshPasswordPromptResolutionInputSchema = Schema.Struct({
   password: Schema.NullOr(Schema.String),
 });
 
+export const DesktopForkPushHeadResultSchema = Schema.Struct({
+  sha: Schema.String,
+});
+export type DesktopForkPushHeadResult = typeof DesktopForkPushHeadResultSchema.Type;
+
+export const DesktopForkInstallInputSchema = Schema.Struct({
+  target: DesktopSshEnvironmentTargetSchema,
+  sha: Schema.String,
+});
+export type DesktopForkInstallInput = typeof DesktopForkInstallInputSchema.Type;
+
+export const DesktopForkInstallResultSchema = Schema.Struct({
+  sha: Schema.String,
+  logTail: Schema.String,
+});
+export type DesktopForkInstallResult = typeof DesktopForkInstallResultSchema.Type;
+
 export const PersistedSavedEnvironmentRecordSchema = Schema.Struct({
   environmentId: EnvironmentId,
   label: Schema.String,
@@ -1052,6 +1069,16 @@ export interface DesktopBridge {
   setConnectionCatalog?: (catalog: string) => Promise<boolean>;
   clearConnectionCatalog?: () => Promise<void>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
+  /**
+   * Push a clean local checkout to the GitHub fork remote. Optional: older
+   * desktop builds and non-desktop clients lack it.
+   */
+  pushForkHead?: () => Promise<DesktopForkPushHeadResult>;
+  /**
+   * SSH to an environment and build/replace its Linux AppImage at `sha`.
+   * Optional: older desktop builds lack it.
+   */
+  installForkAppImage?: (input: DesktopForkInstallInput) => Promise<DesktopForkInstallResult>;
   ensureSshEnvironment: (
     target: DesktopSshEnvironmentTarget,
     options?: { issuePairingToken?: boolean },

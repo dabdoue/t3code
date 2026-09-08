@@ -1,9 +1,14 @@
 import type { EnvironmentId, ServerConfig, ServerSelfUpdateCapability } from "@t3tools/contracts";
 import type { ServerUpdateState } from "@t3tools/client-runtime/state/server";
+import {
+  forkRevisionsDiffer,
+  manualForkServerUpdateCommand,
+  normalizeForkRevision,
+} from "@t3tools/shared/forkRevision";
 import { compareSemverVersions, parseSemver } from "@t3tools/shared/semver";
 import * as Schema from "effect/Schema";
 
-import { APP_VERSION } from "./branding";
+import { APP_FORK_REVISION, APP_VERSION } from "./branding";
 import { getLocalStorageItem, setLocalStorageItem } from "./hooks/useLocalStorage";
 
 export interface VersionMismatch {
@@ -106,6 +111,14 @@ export function supportsDesktopAppUpdate(
   return serverConfig?.environment.capabilities.desktopAppUpdate === true;
 }
 
+/** True when the connected server can install this fork over the existing
+    connection. Older servers must not receive a SHA via server.updateServer. */
+export function supportsForkServerUpdate(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): boolean {
+  return serverConfig?.environment.capabilities.forkServerUpdate === true;
+}
+
 /** The command to hand users whose server cannot update itself. */
 export function manualServerUpdateCommand(targetVersion: string): string {
   return `npx t3@${targetVersion}`;
@@ -166,4 +179,51 @@ export function dismissVersionMismatch(dismissalKey: string | null | undefined):
   writeVersionMismatchDismissals({
     keys: [...document.keys, dismissalKey],
   });
+}
+
+export interface ForkRevisionMismatch {
+  readonly clientRevision: string;
+  readonly serverRevision: string | null;
+}
+
+export const FORK_MISMATCH_HINT =
+  "This client is a different fork build than that Linux machine. Update that server to stay in sync.";
+
+export function shortForkRevision(revision: string | null | undefined): string {
+  const normalized = normalizeForkRevision(revision);
+  return normalized ? normalized.slice(0, 7) : "unknown";
+}
+
+export function resolveForkRevisionMismatch(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): ForkRevisionMismatch | null {
+  if (!APP_FORK_REVISION || !serverConfig) {
+    return null;
+  }
+  if (serverConfig.environment.platform.os !== "linux") {
+    return null;
+  }
+  const serverRevision = normalizeForkRevision(serverConfig.environment.forkRevision);
+  if (!forkRevisionsDiffer(APP_FORK_REVISION, serverRevision)) {
+    return null;
+  }
+  return {
+    clientRevision: APP_FORK_REVISION,
+    serverRevision,
+  };
+}
+
+export function buildForkMismatchDismissalKey(
+  environmentId: EnvironmentId,
+  mismatch: ForkRevisionMismatch,
+): string {
+  return `${environmentId}:fork:${mismatch.clientRevision}:${mismatch.serverRevision ?? "none"}`;
+}
+
+export function manualForkInstallCommand(sha: string): string {
+  return manualForkServerUpdateCommand(sha) ?? `bash -lc 'echo invalid fork revision; exit 1'`;
+}
+
+export function forkInstallGuidance(): string {
+  return "Update this fork's server";
 }

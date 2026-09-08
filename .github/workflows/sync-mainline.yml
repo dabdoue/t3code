@@ -1,0 +1,89 @@
+name: Sync mainline into fork
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 1"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-mainline
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'dabdoue/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Merge pingdotgg/t3code main
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          default_branch="${{ github.event.repository.default_branch }}"
+          git fetch origin "$default_branch"
+          git checkout -B sync/mainline "origin/${default_branch}"
+
+          git remote add pingdotgg https://github.com/pingdotgg/t3code.git
+          git fetch pingdotgg main
+
+          if git merge-base --is-ancestor pingdotgg/main HEAD; then
+            echo "Already up to date with pingdotgg/t3code main."
+            exit 0
+          fi
+
+          if ! git merge pingdotgg/main -X theirs --no-edit; then
+            echo "Merge still has conflicts after taking mainline hunks. Resolve locally." >&2
+            git merge --abort
+            exit 1
+          fi
+
+          merged="$(git rev-parse pingdotgg/main)"
+          date_utc="$(date -u +%Y-%m-%d)"
+          tmp="$(mktemp)"
+          {
+            printf '# Fork changelog\n\n'
+            printf 'Dated sections are added by the weekly mainline-sync workflow. Overlapping hunks take the\n'
+            printf 'incoming pingdotgg/t3code `main` copy. Fork-only files stay. If you and mainline edited the same\n'
+            printf 'lines, the fork copy of those lines is dropped.\n\n'
+            printf '## %s — mainline `%s`\n\n' "$date_utc" "$merged"
+            printf 'Merged pingdotgg/t3code `main` into this fork. Overlapping hunks took the mainline copy.\n\n'
+            printf '### Commits\n\n'
+            git log --oneline ORIG_HEAD..HEAD
+            printf '\n### Diffstat\n\n'
+            git diff --stat ORIG_HEAD..HEAD
+            printf '\n'
+            if [[ -f CHANGELOG.fork.md ]]; then
+              awk 'BEGIN { p = 0 } /^## / { p = 1 } p' CHANGELOG.fork.md
+            fi
+          } >"$tmp"
+          mv "$tmp" CHANGELOG.fork.md
+          git add CHANGELOG.fork.md
+          git diff --cached --quiet || git commit -m "docs(fork): changelog for mainline ${merged:0:7}"
+
+          git push --force-with-lease origin sync/mainline
+
+          if gh pr view sync/mainline --json number >/dev/null 2>&1; then
+            gh pr view sync/mainline --json url --jq .url
+          else
+            gh pr create \
+              --base "$default_branch" \
+              --head sync/mainline \
+              --title "chore(fork): merge pingdotgg main ${date_utc}" \
+              --body "$(printf '%s\n' \
+                'Weekly (or manual) merge of `pingdotgg/t3code` `main` into this fork.' \
+                '' \
+                'Overlapping hunks took the incoming mainline copy (`git merge -X theirs`). Fork-only files stay. Same-line fork edits in those hunks were dropped. Review CHANGELOG.fork.md before merging.')"
+          fi

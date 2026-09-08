@@ -4,6 +4,8 @@ for (const stream of [process.stdout, process.stderr]) {
   });
 }
 
+declare const __T3CODE_FORK_REVISION__: string | undefined;
+
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -223,5 +225,13 @@ const desktopRuntimeLayer = desktopClerkLayer.pipe(
   ),
   Layer.provideMerge(DesktopPreReadyPlatform.layer),
 );
+
+if (
+  !process.env.T3CODE_FORK_REVISION?.trim() &&
+  typeof __T3CODE_FORK_REVISION__ === "string" &&
+  __T3CODE_FORK_REVISION__.trim().length > 0
+) {
+  process.env.T3CODE_FORK_REVISION = __T3CODE_FORK_REVISION__.trim();
+}
 
 DesktopApp.program.pipe(Effect.provide(desktopRuntimeLayer), NodeRuntime.runMain);

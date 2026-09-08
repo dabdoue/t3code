@@ -10,6 +10,7 @@ This is a living glossary for T3 Code. It explains what common terms mean in thi
 - [Thread timeline](#thread-timeline)
 - [Orchestration](#orchestration)
 - [Provider runtime](#provider-runtime)
+- [Fork builds](#fork-builds)
 - [Checkpointing](#checkpointing)
 - [Appearance](#appearance)
 
@@ -128,6 +129,15 @@ A read-only quota feed outside this environment's provider CLIs, configured unde
 #### Model manifest
 
 The per-driver list of current model slugs that decides which models land in the model picker's legacy section. Bundled at `apps/server/src/provider/model-manifest.json` and refreshed at runtime from the same file on `main`, so classification updates ship as commits instead of releases. See the [provider architecture][16] model manifest section.
+
+### Fork builds
+
+#### Fork revision
+
+Optional git SHA stamped into the environment descriptor as `forkRevision` when a fork
+build is produced. Official T3 omits it. Clients compare their baked SHA to the connected server
+and offer **Update** when they differ on Linux. See [fork-installs.md](../user/fork-installs.md)
+and [environment.ts](../../packages/contracts/src/environment.ts).
 
 ### Checkpointing
 

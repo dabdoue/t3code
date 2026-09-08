@@ -248,10 +248,52 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       const withoutFd = yield* describeWith({ mode: "desktop" });
       expect(withoutFd.capabilities.serverSelfUpdate).toBe("desktop-managed");
       expect(withoutFd.capabilities.desktopAppUpdate).toBeUndefined();
-      expect(withoutFd.capabilities.serverSelfUpdateProgress).toBeUndefined();
+      if (process.platform === "linux") {
+        expect(withoutFd.capabilities.forkServerUpdate).toBe(true);
+        expect(withoutFd.capabilities.serverSelfUpdateProgress).toBe(true);
+      } else {
+        expect(withoutFd.capabilities.forkServerUpdate).toBeUndefined();
+        expect(withoutFd.capabilities.serverSelfUpdateProgress).toBeUndefined();
+      }
 
       const web = yield* describeWith({ mode: "web", desktopTelemetryControlFd: 5 });
       expect(web.capabilities.desktopAppUpdate).toBeUndefined();
+    }),
+  );
+
+  it.effect("advertises forkRevision only when T3CODE_FORK_REVISION is set", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-fork-revision-test-",
+      });
+      const serverConfig = yield* makeServerConfig(baseDir);
+      yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
+      const previous = process.env.T3CODE_FORK_REVISION;
+      process.env.T3CODE_FORK_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
+      try {
+        const descriptor = yield* Effect.gen(function* () {
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+          return yield* serverEnvironment.getDescriptor;
+        }).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(ServerSecretStore.layer),
+              Layer.provide(ServerConfig.layer(serverConfig)),
+            ),
+          ),
+        );
+        expect(descriptor.forkRevision).toBe("abcdef0123456789abcdef0123456789abcdef01");
+        if (process.platform === "linux") {
+          expect(descriptor.capabilities.forkServerUpdate).toBe(true);
+        }
+      } finally {
+        if (previous === undefined) {
+          delete process.env.T3CODE_FORK_REVISION;
+        } else {
+          process.env.T3CODE_FORK_REVISION = previous;
+        }
+      }
     }),
   );
 

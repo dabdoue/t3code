@@ -182,7 +182,8 @@ run a copied command on the server machine.
 If T3 Connect cannot connect, check the date and time on both devices, then try again.
 
 Finish active work before updating because the server restarts briefly. For step-by-step guidance,
-see [Keeping T3 Code in Sync](./updating.md).
+see [Keeping T3 Code in Sync](./updating.md). For updating this fork's server on another Linux
+machine, see [Update this fork's server on another Linux machine](./fork-installs.md).
 
 On a Linux host, you can keep the server running after logout and manage it independently of the
 connection method. See [Running T3 Code in the Background](./background-service.md).

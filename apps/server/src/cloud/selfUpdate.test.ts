@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
+import { HostProcessExecutablePath, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -42,6 +42,20 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           yield* fs.writeFileString(entry, "export {};\n").pipe(Effect.orDie);
           return {
             stdout: "",
+            stderr: "",
+            code: ChildProcessSpawner.ExitCode(0),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          };
+        }
+        if (input.command === "bash") {
+          const joined = input.args.join(" ");
+          order.push(joined.includes("nohup") ? "fork-restart" : "fork-update");
+          return {
+            stdout: "installed=/tmp/T3-Code.AppImage\n",
             stderr: "",
             code: ChildProcessSpawner.ExitCode(0),
             timedOut: false,
@@ -98,6 +112,7 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
       },
     ),
     Effect.provideService(HostProcessExecutablePath, "/usr/bin/node"),
+    Effect.provideService(HostProcessPlatform, "linux"),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
   return { selfUpdate, order };
@@ -152,6 +167,32 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       expect(stages).toEqual(["downloading", "installing"]);
       // The launcher staging path must not run on the desktop path.
       expect(order).toEqual([]);
+    }),
+  );
+
+  it.effect("installs a fork SHA on desktop-managed servers without the official updater", () =>
+    Effect.gen(function* () {
+      let desktopRan = false;
+      const stages: string[] = [];
+      const sha = "abcdef0123456789abcdef0123456789abcdef01";
+      const { selfUpdate, order } = yield* makeHarness({
+        mode: "desktop",
+        desktopAppUpdate: {
+          available: true,
+          run: () =>
+            Effect.sync(() => {
+              desktopRan = true;
+            }).pipe(Effect.as({ targetVersion: "1.2.0", method: "desktop-app" as const })),
+          commit: () => Effect.never,
+        },
+      });
+      const result = yield* selfUpdate.update({ targetVersion: sha }, (stage) =>
+        Effect.sync(() => void stages.push(stage)),
+      );
+      expect(desktopRan).toBe(false);
+      expect(result).toEqual({ targetVersion: sha, method: "desktop-app" });
+      expect(stages).toEqual(["downloading", "installing"]);
+      expect(order).toEqual(["fork-update", "fork-restart"]);
     }),
   );
 

@@ -101,10 +101,14 @@ import {
 } from "~/environments/primary";
 import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { useUiStateStore } from "~/uiStateStore";
+import { sshTargetFromCatalogEntry } from "../../forkInstall";
 import {
+  resolveForkRevisionMismatch,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
+  shortForkRevision,
   supportsDesktopAppUpdate,
+  supportsForkServerUpdate,
 } from "~/versionSkew";
 import { hasCloudPublicConfig } from "~/cloud/publicConfig";
 import { useCloudLinkController } from "~/cloud/useCloudLinkController";
@@ -129,6 +133,7 @@ import {
 import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "~/state/server";
 import { ConnectionStatusDot } from "../ConnectionStatusDot";
+import { ForkInstallAction, ForkInstallProgress } from "../ForkInstallAction";
 import { ServerUpdateAction, ServerUpdateProgress } from "../ServerUpdateAction";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
@@ -1403,6 +1408,8 @@ function SavedBackendListRow({
     [copyTraceIdToClipboard],
   );
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
+  const forkMismatch = resolveForkRevisionMismatch(environment.serverConfig);
+  const forkSshTarget = sshTargetFromCatalogEntry(environment.entry);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
     serverUpdateState.status === "running" && serverUpdateState.stage === "resuming";
@@ -1446,24 +1453,48 @@ function SavedBackendListRow({
             <div className="max-w-md">
               <ServerUpdateProgress state={serverUpdateState} />
             </div>
-          ) : versionMismatch ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    type="button"
-                    className="w-fit cursor-help rounded-sm text-left text-muted-foreground text-xs"
-                  >
-                    Server update available
-                  </button>
-                }
-              />
-              <TooltipPopup side="top">
-                {versionMismatch.serverVersion} <span aria-hidden="true">→</span>{" "}
-                {versionMismatch.clientVersion}
-              </TooltipPopup>
-            </Tooltip>
-          ) : null}
+          ) : (
+            <>
+              {versionMismatch ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        className="w-fit cursor-help rounded-sm text-left text-muted-foreground text-xs"
+                      >
+                        Server update available
+                      </button>
+                    }
+                  />
+                  <TooltipPopup side="top">
+                    {versionMismatch.serverVersion} <span aria-hidden="true">→</span>{" "}
+                    {versionMismatch.clientVersion}
+                  </TooltipPopup>
+                </Tooltip>
+              ) : null}
+              {forkMismatch ? (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        type="button"
+                        className="w-fit cursor-help rounded-sm text-left text-muted-foreground text-xs"
+                      >
+                        Fork build differs
+                      </button>
+                    }
+                  />
+                  <TooltipPopup side="top">
+                    {shortForkRevision(forkMismatch.serverRevision)}{" "}
+                    <span aria-hidden="true">→</span>{" "}
+                    {shortForkRevision(forkMismatch.clientRevision)}
+                  </TooltipPopup>
+                </Tooltip>
+              ) : null}
+              <ForkInstallProgress environmentId={environmentId} />
+            </>
+          )}
           {environment.connection.error && !resumingServerUpdate ? (
             <p className="flex min-w-0 items-center gap-2 text-destructive text-xs">
               <span className="truncate">{connectionStatusText(environment.connection)}</span>
@@ -1489,6 +1520,16 @@ function SavedBackendListRow({
               desktopAppUpdate={supportsDesktopAppUpdate(environment.serverConfig)}
               targetVersion={versionMismatch.clientVersion}
               label={serverUpdateState.status === "failed" ? "Retry" : "Update"}
+            />
+          ) : null}
+          {forkMismatch ? (
+            <ForkInstallAction
+              environmentId={environmentId}
+              serverLabel={`${environment.label} server`}
+              sshTarget={forkSshTarget}
+              targetRevision={forkMismatch.clientRevision}
+              forkServerUpdate={supportsForkServerUpdate(environment.serverConfig)}
+              selfUpdate={resolveServerSelfUpdateCapability(environment.serverConfig)}
             />
           ) : null}
           {isWslEnvironment ? (

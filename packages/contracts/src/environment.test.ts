@@ -40,6 +40,32 @@ describe("ExecutionEnvironmentDescriptor", () => {
     ).toBe(true);
   });
 
+  it("treats a missing fork revision as an official or older server", () => {
+    expect(decodeDescriptor(descriptor).forkRevision).toBeUndefined();
+  });
+
+  it("preserves an advertised fork revision", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        forkRevision: "abcdef0123456789abcdef0123456789abcdef01",
+      }).forkRevision,
+    ).toBe("abcdef0123456789abcdef0123456789abcdef01");
+  });
+
+  it("treats a missing forkServerUpdate capability as an older server", () => {
+    expect(decodeDescriptor(descriptor).capabilities.forkServerUpdate).toBeUndefined();
+  });
+
+  it("preserves an advertised forkServerUpdate capability", () => {
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, forkServerUpdate: true },
+      }).capabilities.forkServerUpdate,
+    ).toBe(true);
+  });
+
   it("preserves the server's generic attachment upload limit", () => {
     expect(
       decodeDescriptor({

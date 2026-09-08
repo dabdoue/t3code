@@ -188,6 +188,7 @@ import {
   CheckCircle2Icon,
   ChevronDownIcon,
   GitBranchIcon,
+  InfoIcon,
   Minimize2Icon,
   PaperclipIcon,
   WifiOffIcon,
@@ -424,22 +425,29 @@ import {
   AlertDialogTitle,
 } from "./ui/alert-dialog";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
+import { ForkInstallAction } from "./ForkInstallAction";
 import { ServerUpdateAction } from "./ServerUpdateAction";
 import {
   ComposerServerUpdateIcon,
   ComposerServerUpdateStatus,
 } from "./chat/ComposerServerUpdateStatus";
 import {
+  buildForkMismatchDismissalKey,
   buildVersionMismatchDismissalKey,
   dismissServerUpdateFailure,
   dismissVersionMismatch,
+  FORK_MISMATCH_HINT,
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
+  resolveForkRevisionMismatch,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
   serverUpdateGuidance,
+  shortForkRevision,
   supportsDesktopAppUpdate,
+  supportsForkServerUpdate,
 } from "../versionSkew";
+import { sshTargetFromCatalogEntry, useForkInstallState } from "../forkInstall";
 import { useAssetUrls } from "../assets/assetUrls";
 
 const ATTACHMENT_ONLY_BOOTSTRAP_PROMPT =
@@ -2252,6 +2260,24 @@ function ChatViewContent(props: ChatViewProps) {
     isVersionMismatchDismissed(versionMismatchDismissKey);
   const showVersionMismatchBanner =
     versionMismatch !== null && versionMismatchDismissKey !== null && !versionMismatchDismissed;
+  const forkMismatch = resolveForkRevisionMismatch(serverConfig);
+  const forkMismatchDismissKey =
+    forkMismatch && activeThread
+      ? buildForkMismatchDismissalKey(activeThread.environmentId, forkMismatch)
+      : null;
+  const [dismissedForkMismatchKey, setDismissedForkMismatchKey] = useState<string | null>(null);
+  const forkMismatchDismissed =
+    forkMismatchDismissKey === dismissedForkMismatchKey ||
+    isVersionMismatchDismissed(forkMismatchDismissKey);
+  const forkInstallState = useForkInstallState(activeThread?.environmentId ?? null);
+  const showForkMismatchBanner =
+    forkMismatch !== null &&
+    forkMismatchDismissKey !== null &&
+    !forkMismatchDismissed &&
+    forkInstallState.status !== "succeeded";
+  const forkSshTarget = activeEnvironment
+    ? sshTargetFromCatalogEntry(activeEnvironment.entry)
+    : null;
   const hasMultipleRegisteredEnvironments = environments.length > 1;
   const versionMismatchServerLabel =
     hasMultipleRegisteredEnvironments && activeThread
@@ -2260,6 +2286,7 @@ function ChatViewContent(props: ChatViewProps) {
   const serverUpdateEnvironmentId = activeThread?.environmentId ?? null;
   const versionMismatchSelfUpdate = resolveServerSelfUpdateCapability(serverConfig);
   const versionMismatchDesktopAppUpdate = supportsDesktopAppUpdate(serverConfig);
+  const versionMismatchForkServerUpdate = supportsForkServerUpdate(serverConfig);
   const serverUpdateState = useAtomValue(
     serverEnvironment.updateStateAtom(serverUpdateEnvironmentId),
   );
@@ -2387,18 +2414,44 @@ function ChatViewContent(props: ChatViewProps) {
             : undefined,
         actions:
           updateInProgress ||
-          !versionMismatch ||
+          (!versionMismatch && !forkMismatch) ||
           (versionMismatchSelfUpdate === "desktop-managed" &&
-            !versionMismatchDesktopAppUpdate) ? undefined : (
-            <ServerUpdateAction
-              environmentId={serverUpdateEnvironmentId}
-              serverLabel={versionMismatchServerLabel}
-              selfUpdate={versionMismatchSelfUpdate}
-              desktopAppUpdate={versionMismatchDesktopAppUpdate}
-              targetVersion={versionMismatch.clientVersion}
-              label={updateFailed ? "Retry" : "Update"}
-              variant="ghost"
-            />
+            !versionMismatchDesktopAppUpdate &&
+            !forkMismatch) ? undefined : (
+            <>
+              {versionMismatch &&
+              !(
+                versionMismatchSelfUpdate === "desktop-managed" && !versionMismatchDesktopAppUpdate
+              ) ? (
+                <ServerUpdateAction
+                  environmentId={serverUpdateEnvironmentId}
+                  serverLabel={versionMismatchServerLabel}
+                  selfUpdate={versionMismatchSelfUpdate}
+                  desktopAppUpdate={versionMismatchDesktopAppUpdate}
+                  targetVersion={versionMismatch.clientVersion}
+                  label={updateFailed ? "Retry" : "Update"}
+                  variant="ghost"
+                />
+              ) : null}
+              {forkMismatch ? (
+                <ForkInstallAction
+                  environmentId={serverUpdateEnvironmentId}
+                  serverLabel={versionMismatchServerLabel}
+                  sshTarget={forkSshTarget}
+                  targetRevision={forkMismatch.clientRevision}
+                  forkServerUpdate={versionMismatchForkServerUpdate}
+                  selfUpdate={versionMismatchSelfUpdate}
+                  label={
+                    forkInstallState.status === "failed"
+                      ? "Retry"
+                      : versionMismatch
+                        ? "Update fork"
+                        : "Update"
+                  }
+                  variant="ghost"
+                />
+              ) : null}
+            </>
           ),
         ...(updateInProgress || (!updateFailed && !versionMismatchDismissKey)
           ? {}
@@ -2411,6 +2464,71 @@ function ChatViewContent(props: ChatViewProps) {
                 }
                 dismissVersionMismatch(versionMismatchDismissKey);
                 setDismissedVersionMismatchKey(versionMismatchDismissKey);
+              },
+            }),
+      });
+    }
+    if (
+      serverUpdateEnvironmentId &&
+      forkMismatch &&
+      serverUpdateState.status === "idle" &&
+      (forkInstallState.status === "updating" ||
+        forkInstallState.status === "failed" ||
+        (showForkMismatchBanner && !showVersionMismatchBanner))
+    ) {
+      items.push({
+        id: `fork-revision:${serverUpdateEnvironmentId}`,
+        variant: forkInstallState.status === "failed" ? "error" : "default",
+        priority: forkInstallState.status === "updating" ? "urgent" : "notice",
+        icon: <InfoIcon />,
+        title:
+          forkInstallState.status === "updating" || forkInstallState.status === "failed" ? (
+            <span>
+              {forkInstallState.status === "failed"
+                ? `Could not update ${versionMismatchServerLabel}`
+                : `Updating ${versionMismatchServerLabel}`}
+            </span>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button type="button" className="cursor-help rounded-sm text-left">
+                    Fork build differs
+                  </button>
+                }
+              />
+              <TooltipPopup side="top">
+                {versionMismatchServerLabel} {shortForkRevision(forkMismatch.serverRevision)}{" "}
+                <span aria-hidden="true">→</span> {shortForkRevision(forkMismatch.clientRevision)}
+              </TooltipPopup>
+            </Tooltip>
+          ),
+        description:
+          forkInstallState.status === "failed"
+            ? forkInstallState.message
+            : forkInstallState.status === "updating"
+              ? undefined
+              : FORK_MISMATCH_HINT,
+        actions:
+          forkInstallState.status === "updating" ? undefined : (
+            <ForkInstallAction
+              environmentId={serverUpdateEnvironmentId}
+              serverLabel={versionMismatchServerLabel}
+              sshTarget={forkSshTarget}
+              targetRevision={forkMismatch.clientRevision}
+              forkServerUpdate={versionMismatchForkServerUpdate}
+              selfUpdate={versionMismatchSelfUpdate}
+              label={forkInstallState.status === "failed" ? "Retry" : "Update"}
+              variant="ghost"
+            />
+          ),
+        ...(forkInstallState.status === "updating" || !forkMismatchDismissKey
+          ? {}
+          : {
+              dismissLabel: "Dismiss fork update notice",
+              onDismiss: () => {
+                dismissVersionMismatch(forkMismatchDismissKey);
+                setDismissedForkMismatchKey(forkMismatchDismissKey);
               },
             }),
       });
@@ -2430,7 +2548,14 @@ function ChatViewContent(props: ChatViewProps) {
     serverUpdateEnvironmentId,
     versionMismatchSelfUpdate,
     versionMismatchDesktopAppUpdate,
+    versionMismatchForkServerUpdate,
     versionMismatchServerLabel,
+    forkMismatch,
+    forkMismatchDismissKey,
+    forkSshTarget,
+    forkInstallState,
+    showForkMismatchBanner,
+    setDismissedForkMismatchKey,
   ]);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
   const unlockedSelectedProvider = resolveSelectableProvider(

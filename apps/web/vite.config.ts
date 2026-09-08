@@ -13,6 +13,7 @@ import pkg from "./package.json" with { type: "json" };
 import { DEV_PROXIED_PATH_PREFIXES } from "@t3tools/shared/devProxy";
 
 import { loadRepoEnv } from "../../scripts/lib/public-config";
+import { resolveForkRevision } from "../../scripts/lib/resolve-fork-revision";
 
 const repoEnv = loadRepoEnv();
 Object.assign(process.env, repoEnv);
@@ -205,6 +206,7 @@ export default defineConfig(() => {
       "import.meta.env.VITE_HOSTED_APP_URL": JSON.stringify(configuredHostedAppUrl ?? ""),
       "import.meta.env.VITE_HOSTED_APP_CHANNEL": JSON.stringify(configuredHostedAppChannel),
       "import.meta.env.APP_VERSION": JSON.stringify(configuredAppVersion),
+      "import.meta.env.T3CODE_FORK_REVISION": JSON.stringify(resolveForkRevision() ?? ""),
     },
     resolve: {
       tsconfigPaths: true,

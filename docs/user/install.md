@@ -140,4 +140,5 @@ For multi-account setups, see [Codex](./providers-codex.md) and [Claude](./provi
 - [Permission modes](./permission-modes.md): how much T3 Code asks before acting
 - [Remote access](./remote-access.md): connect from a phone, tablet, or another desktop
 - [Keeping T3 Code in sync](./updating.md): client and server version skew
+- [Update this fork's server on another Linux machine](./fork-installs.md): fork SHA sync
 - [Running in the background](./background-service.md): Linux background service

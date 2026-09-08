@@ -243,6 +243,10 @@
       "types": "./src/usageLimits.ts",
       "import": "./src/usageLimits.ts"
     },
+    "./forkRevision": {
+      "types": "./src/forkRevision.ts",
+      "import": "./src/forkRevision.ts"
+    },
     "./desktopAppControl": {
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"

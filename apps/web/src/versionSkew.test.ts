@@ -4,21 +4,29 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 // Pinned so the direction cases below read as fixed versions instead of
 // arithmetic on whatever version this checkout happens to be at.
-const branding = vi.hoisted(() => ({ APP_VERSION: "0.0.34" }));
+const branding = vi.hoisted(() => ({
+  APP_VERSION: "0.0.34",
+  APP_FORK_REVISION: null as string | null,
+}));
 vi.mock("./branding", () => branding);
 
 import { APP_VERSION } from "./branding";
 import {
+  buildForkMismatchDismissalKey,
   buildVersionMismatchDismissalKey,
   dismissServerUpdateFailure,
   dismissVersionMismatch,
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
+  resolveForkRevisionMismatch,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
   resolveVersionMismatch,
   serverUpdateGuidance,
+  shortForkRevision,
   supportsDesktopAppUpdate,
+  supportsForkServerUpdate,
+  manualForkInstallCommand,
 } from "./versionSkew";
 
 const MISMATCH_HINT =
@@ -27,6 +35,7 @@ const MISMATCH_HINT =
 describe("versionSkew", () => {
   beforeEach(() => {
     branding.APP_VERSION = "0.0.34";
+    branding.APP_FORK_REVISION = null;
   });
 
   it("dismisses only the current failed attempt without clearing its retry state", () => {
@@ -217,5 +226,92 @@ describe("versionSkew", () => {
   it("matches version-drift guidance to the advertised update path", () => {
     expect(serverUpdateGuidance("respawn")).toBe("Update to stay in sync");
     expect(serverUpdateGuidance("desktop-managed")).toBe("Update the desktop app");
+  });
+
+  it("does not offer a fork install when this client is not a fork build", () => {
+    expect(
+      resolveForkRevisionMismatch({
+        environment: {
+          environmentId: EnvironmentId.make("environment-linux"),
+          label: "Remote",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "0.0.38",
+          capabilities: { repositoryIdentity: true },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("offers a fork install when Linux fork SHAs differ, including an unstamped remote", () => {
+    branding.APP_FORK_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
+    const linux = (forkRevision?: string) => ({
+      environment: {
+        environmentId: EnvironmentId.make("environment-linux"),
+        label: "Remote",
+        platform: { os: "linux" as const, arch: "x64" as const },
+        serverVersion: "0.0.38",
+        ...(forkRevision === undefined ? {} : { forkRevision }),
+        capabilities: { repositoryIdentity: true },
+      },
+    });
+
+    expect(resolveForkRevisionMismatch(linux())).toEqual({
+      clientRevision: "abcdef0123456789abcdef0123456789abcdef01",
+      serverRevision: null,
+    });
+    expect(resolveForkRevisionMismatch(linux("fedcba9876543210fedcba9876543210fedcba98"))).toEqual({
+      clientRevision: "abcdef0123456789abcdef0123456789abcdef01",
+      serverRevision: "fedcba9876543210fedcba9876543210fedcba98",
+    });
+    expect(
+      resolveForkRevisionMismatch(linux("abcdef0123456789abcdef0123456789abcdef01")),
+    ).toBeNull();
+    expect(shortForkRevision("abcdef0123456789abcdef0123456789abcdef01")).toBe("abcdef0");
+    expect(
+      buildForkMismatchDismissalKey(EnvironmentId.make("environment-linux"), {
+        clientRevision: "abcdef0123456789abcdef0123456789abcdef01",
+        serverRevision: null,
+      }),
+    ).toBe("environment-linux:fork:abcdef0123456789abcdef0123456789abcdef01:none");
+  });
+
+  it("does not offer a fork update for macOS remotes", () => {
+    branding.APP_FORK_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
+    expect(
+      resolveForkRevisionMismatch({
+        environment: {
+          environmentId: EnvironmentId.make("environment-mac"),
+          label: "Mac",
+          platform: { os: "darwin", arch: "arm64" },
+          serverVersion: "0.0.38",
+          forkRevision: "fedcba9876543210fedcba9876543210fedcba98",
+          capabilities: { repositoryIdentity: true },
+        },
+      }),
+    ).toBeNull();
+  });
+
+  it("reads fork server-update support from config descriptors", () => {
+    expect(
+      supportsForkServerUpdate({
+        environment: {
+          environmentId: EnvironmentId.make("environment-linux"),
+          label: "Remote",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "0.0.38",
+          capabilities: { repositoryIdentity: true, forkServerUpdate: true },
+        },
+      }),
+    ).toBe(true);
+    expect(supportsForkServerUpdate(null)).toBe(false);
+  });
+
+  it("copies a cwd-independent fork update command", () => {
+    const sha = "abcdef0123456789abcdef0123456789abcdef01";
+    const command = manualForkInstallCommand(sha);
+    expect(command.startsWith("bash -lc ")).toBe(true);
+    expect(command).toContain(sha);
+    expect(command).not.toContain("T3CODE_FORK_APPIMAGE=");
+    expect(command).not.toContain("./scripts/");
   });
 });

@@ -3,6 +3,7 @@ import {
   PROVIDER_SEND_TURN_MAX_FILE_BYTES,
   type ExecutionEnvironmentDescriptor,
 } from "@t3tools/contracts";
+import { readForkRevisionFromEnv } from "@t3tools/shared/forkRevision";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -193,21 +194,25 @@ export const make = Effect.gen(function* () {
     desktopManaged: serverConfig.mode === "desktop",
     launcherManaged: launcher.managed,
   });
+  const os = platformOs(hostPlatform);
+  const forkServerUpdate = os === "linux";
   // Static is correct: the control fd is known at bootstrap, and the desktop
   // app and its bundled server ship in one artifact, so a present fd means
   // the app speaks the requestDesktopUpdate protocol. WSL backends never get
   // the fd and correctly do not advertise.
   const desktopAppUpdate =
     serverSelfUpdate === "desktop-managed" && serverConfig.desktopTelemetryControlFd !== undefined;
+  const forkRevision = readForkRevisionFromEnv(process.env);
 
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
     label,
     platform: {
-      os: platformOs(hostPlatform),
+      os,
       arch: platformArch(hostArchitecture),
     },
     serverVersion: packageJson.version,
+    ...(forkRevision === null ? {} : { forkRevision }),
     capabilities: {
       repositoryIdentity: true,
       connectionProbe: true,
@@ -225,10 +230,11 @@ export const make = Effect.gen(function* () {
       threadTitleRegeneration: true,
       threadPullRequestLinking: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
-      ...(serverSelfUpdate === "boot-service" || desktopAppUpdate
+      ...(serverSelfUpdate === "boot-service" || desktopAppUpdate || forkServerUpdate
         ? { serverSelfUpdateProgress: true }
         : {}),
       ...(desktopAppUpdate ? { desktopAppUpdate: true } : {}),
+      ...(forkServerUpdate ? { forkServerUpdate: true } : {}),
     },
   };
 

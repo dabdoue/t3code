@@ -8,6 +8,7 @@ import {
   type ServerSelfUpdateResult,
   WS_METHODS,
 } from "@t3tools/contracts";
+import { forkRevisionsMatch, normalizeForkRevision } from "@t3tools/shared/forkRevision";
 import * as Cause from "effect/Cause";
 import * as Duration from "effect/Duration";
 import * as Deferred from "effect/Deferred";
@@ -129,9 +130,19 @@ export function matchesServerUpdateReadyEvent(
   result: ServerSelfUpdateResult,
   event: ServerLifecycleStreamReadyEvent,
 ): boolean {
-  return result.updateId === undefined
-    ? event.payload.environment.serverVersion === result.targetVersion
-    : event.payload.updateOutcome?.id === result.updateId;
+  if (result.updateId !== undefined) {
+    return event.payload.updateOutcome?.id === result.updateId;
+  }
+  if (event.payload.environment.serverVersion === result.targetVersion) {
+    return true;
+  }
+  const targetRevision = normalizeForkRevision(result.targetVersion);
+  const resumedRevision = normalizeForkRevision(event.payload.environment.forkRevision);
+  return (
+    targetRevision !== null &&
+    resumedRevision !== null &&
+    forkRevisionsMatch(targetRevision, resumedRevision)
+  );
 }
 
 export function matchesServerUpdateResumeEvent(

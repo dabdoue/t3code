@@ -1,6 +1,7 @@
 import { defineConfig } from "vite-plus";
 
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
+import { resolveForkRevision } from "../../scripts/lib/resolve-fork-revision.ts";
 
 const repoEnv = loadRepoEnv();
 const shouldLaunchElectronAfterPack = process.env.T3CODE_DESKTOP_DEV === "1";
@@ -8,6 +9,7 @@ const publicConfigDefine = {
   __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: JSON.stringify(
     repoEnv.T3CODE_CLERK_PUBLISHABLE_KEY?.trim() ?? "",
   ),
+  __T3CODE_FORK_REVISION__: JSON.stringify(resolveForkRevision() ?? ""),
 };
 
 export default defineConfig({

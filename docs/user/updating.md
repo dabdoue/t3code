@@ -31,6 +31,12 @@ The update does not remove saved threads, settings, or project files.
 The available action depends on how that server was started. T3 Code does not update connected
 servers silently in the background.
 
+A custom fork can share the same version number as another machine while running a different git
+commit. In that case **Update** (or **Update fork** next to official **Update**) appears. That path
+uses the connection you already have, the same way official remote server update does. It does not
+run official `npx t3@…`. If the automatic update fails, copy the command and run it on that
+machine — it works from any directory. See [Update this fork's server on another Linux machine](./fork-installs.md).
+
 An older background-service launcher may ask you to run the exact
 `npx t3@<version> service update` command on the server machine. That one local update installs the
 rollback support needed for later remote updates, including versions that change the database.
