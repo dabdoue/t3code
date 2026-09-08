@@ -103,9 +103,13 @@ import { isDesktopLocalConnectionTarget } from "~/connection/desktopLocal";
 import { useUiStateStore } from "~/uiStateStore";
 import { sshTargetFromCatalogEntry } from "../../forkInstall";
 import {
+  forkServerUpdateLabel,
+  mainlineServerUpdateLabel,
+  mainlineServerUpdateTargetVersion,
   resolveForkRevisionMismatch,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
+  shouldOfferMainlineServerUpdate,
   shortForkRevision,
   supportsDesktopAppUpdate,
   supportsForkServerUpdate,
@@ -1409,6 +1413,7 @@ function SavedBackendListRow({
   );
   const versionMismatch = resolveServerConfigVersionMismatch(environment.serverConfig);
   const forkMismatch = resolveForkRevisionMismatch(environment.serverConfig);
+  const offerMainlineUpdate = shouldOfferMainlineServerUpdate(environment.serverConfig);
   const forkSshTarget = sshTargetFromCatalogEntry(environment.entry);
   const serverUpdateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
   const resumingServerUpdate =
@@ -1511,15 +1516,18 @@ function SavedBackendListRow({
           ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
-          {versionMismatch &&
+          {offerMainlineUpdate &&
           (serverUpdateState.status === "idle" || serverUpdateState.status === "failed") ? (
             <ServerUpdateAction
               environmentId={environmentId}
               serverLabel={`${environment.label} server`}
               selfUpdate={resolveServerSelfUpdateCapability(environment.serverConfig)}
               desktopAppUpdate={supportsDesktopAppUpdate(environment.serverConfig)}
-              targetVersion={versionMismatch.clientVersion}
-              label={serverUpdateState.status === "failed" ? "Retry" : "Update"}
+              targetVersion={mainlineServerUpdateTargetVersion(environment.serverConfig)}
+              label={mainlineServerUpdateLabel({
+                offerFork: forkMismatch !== null,
+                failed: serverUpdateState.status === "failed",
+              })}
             />
           ) : null}
           {forkMismatch ? (
@@ -1529,6 +1537,10 @@ function SavedBackendListRow({
               sshTarget={forkSshTarget}
               targetRevision={forkMismatch.clientRevision}
               forkServerUpdate={supportsForkServerUpdate(environment.serverConfig)}
+              label={forkServerUpdateLabel({
+                offerMainline: offerMainlineUpdate,
+                failed: false,
+              })}
             />
           ) : null}
           {isWslEnvironment ? (
@@ -1911,6 +1923,10 @@ export function ConnectionsSettings() {
   >(null);
   const primaryServerConfig = primaryEnvironment?.serverConfig ?? null;
   const primaryVersionMismatch = resolveServerConfigVersionMismatch(primaryServerConfig);
+  const primaryForkMismatch = resolveForkRevisionMismatch(primaryServerConfig);
+  const offerPrimaryMainlineUpdate = shouldOfferMainlineServerUpdate(primaryServerConfig);
+  const primaryForkSshTarget =
+    primaryEnvironment === undefined ? null : sshTargetFromCatalogEntry(primaryEnvironment.entry);
   const primaryServerUpdateState = useAtomValue(
     serverEnvironment.updateStateAtom(primaryEnvironmentId),
   );
@@ -3065,48 +3081,103 @@ export function ConnectionsSettings() {
       {canManageLocalBackend ? (
         <>
           <SettingsSection {...searchableSetting("connections-environment")}>
-            {primaryVersionMismatch || primaryServerUpdateState.status !== "idle" ? (
+            {primaryVersionMismatch ||
+            primaryForkMismatch ||
+            offerPrimaryMainlineUpdate ||
+            primaryServerUpdateState.status !== "idle" ? (
               <SettingsRow
                 title={
                   primaryServerUpdateState.status === "failed"
                     ? "Update failed"
                     : primaryServerUpdateState.status === "running"
                       ? "Updating server"
-                      : "Server update available"
+                      : primaryForkMismatch && offerPrimaryMainlineUpdate
+                        ? "Server updates"
+                        : primaryForkMismatch
+                          ? "Fork update available"
+                          : "Server update available"
                 }
                 description={
                   primaryServerUpdateState.status !== "idle" ? (
                     <ServerUpdateProgress state={primaryServerUpdateState} />
-                  ) : primaryVersionMismatch ? (
-                    <Tooltip>
-                      <TooltipTrigger
-                        render={
-                          <button type="button" className="w-fit cursor-help rounded-sm text-left">
-                            Update to match this client.
-                          </button>
-                        }
-                      />
-                      <TooltipPopup side="top">
-                        {primaryVersionMismatch.serverVersion} <span aria-hidden="true">→</span>{" "}
-                        {primaryVersionMismatch.clientVersion}
-                      </TooltipPopup>
-                    </Tooltip>
-                  ) : null
+                  ) : (
+                    <span className="flex flex-col gap-1">
+                      {primaryVersionMismatch ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                className="w-fit cursor-help rounded-sm text-left"
+                              >
+                                Update to match this client.
+                              </button>
+                            }
+                          />
+                          <TooltipPopup side="top">
+                            {primaryVersionMismatch.serverVersion} <span aria-hidden="true">→</span>{" "}
+                            {primaryVersionMismatch.clientVersion}
+                          </TooltipPopup>
+                        </Tooltip>
+                      ) : offerPrimaryMainlineUpdate ? (
+                        <span>Install official T3 on this machine.</span>
+                      ) : null}
+                      {primaryForkMismatch ? (
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <button
+                                type="button"
+                                className="w-fit cursor-help rounded-sm text-left"
+                              >
+                                Fork build differs
+                              </button>
+                            }
+                          />
+                          <TooltipPopup side="top">
+                            {shortForkRevision(primaryForkMismatch.serverRevision)}{" "}
+                            <span aria-hidden="true">→</span>{" "}
+                            {shortForkRevision(primaryForkMismatch.clientRevision)}
+                          </TooltipPopup>
+                        </Tooltip>
+                      ) : null}
+                    </span>
+                  )
                 }
                 control={
-                  primaryVersionMismatch &&
-                  primaryEnvironmentId !== null &&
-                  primaryServerUpdateState.status !== "running" ? (
-                    <ServerUpdateAction
-                      environmentId={primaryEnvironmentId}
-                      serverLabel={
-                        primaryEnvironment ? `${primaryEnvironment.label} server` : "server"
-                      }
-                      selfUpdate={resolveServerSelfUpdateCapability(primaryServerConfig)}
-                      desktopAppUpdate={supportsDesktopAppUpdate(primaryServerConfig)}
-                      targetVersion={primaryVersionMismatch.clientVersion}
-                      label={primaryServerUpdateState.status === "failed" ? "Retry" : "Update"}
-                    />
+                  primaryEnvironmentId !== null && primaryServerUpdateState.status !== "running" ? (
+                    <span className="inline-flex flex-wrap items-center justify-end gap-2">
+                      {offerPrimaryMainlineUpdate ? (
+                        <ServerUpdateAction
+                          environmentId={primaryEnvironmentId}
+                          serverLabel={
+                            primaryEnvironment ? `${primaryEnvironment.label} server` : "server"
+                          }
+                          selfUpdate={resolveServerSelfUpdateCapability(primaryServerConfig)}
+                          desktopAppUpdate={supportsDesktopAppUpdate(primaryServerConfig)}
+                          targetVersion={mainlineServerUpdateTargetVersion(primaryServerConfig)}
+                          label={mainlineServerUpdateLabel({
+                            offerFork: primaryForkMismatch !== null,
+                            failed: primaryServerUpdateState.status === "failed",
+                          })}
+                        />
+                      ) : null}
+                      {primaryForkMismatch ? (
+                        <ForkInstallAction
+                          environmentId={primaryEnvironmentId}
+                          serverLabel={
+                            primaryEnvironment ? `${primaryEnvironment.label} server` : "server"
+                          }
+                          sshTarget={primaryForkSshTarget}
+                          targetRevision={primaryForkMismatch.clientRevision}
+                          forkServerUpdate={supportsForkServerUpdate(primaryServerConfig)}
+                          label={forkServerUpdateLabel({
+                            offerMainline: offerPrimaryMainlineUpdate,
+                            failed: false,
+                          })}
+                        />
+                      ) : null}
+                    </span>
                   ) : undefined
                 }
               />

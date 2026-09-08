@@ -111,6 +111,48 @@ export function supportsDesktopAppUpdate(
   return serverConfig?.environment.capabilities.desktopAppUpdate === true;
 }
 
+export function serverRunsForkRevision(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): boolean {
+  return normalizeForkRevision(serverConfig?.environment.forkRevision) !== null;
+}
+
+/** Official npm/GitHub Update: version skew, or a fork server that can go back to mainline. */
+export function shouldOfferMainlineServerUpdate(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): boolean {
+  return (
+    resolveServerConfigVersionMismatch(serverConfig) !== null ||
+    serverRunsForkRevision(serverConfig)
+  );
+}
+
+export function mainlineServerUpdateTargetVersion(
+  serverConfig: Pick<ServerConfig, "environment"> | null | undefined,
+): string {
+  return resolveServerConfigVersionMismatch(serverConfig)?.clientVersion ?? APP_VERSION;
+}
+
+export function mainlineServerUpdateLabel(input: {
+  readonly offerFork: boolean;
+  readonly failed: boolean;
+}): string {
+  if (input.failed) {
+    return "Retry";
+  }
+  return input.offerFork ? "Update to mainline" : "Update";
+}
+
+export function forkServerUpdateLabel(input: {
+  readonly offerMainline: boolean;
+  readonly failed: boolean;
+}): string {
+  if (input.failed) {
+    return "Retry";
+  }
+  return input.offerMainline ? "Update fork" : "Update";
+}
+
 /** True when the connected server can install this fork over the existing
     connection. Older servers must not receive a SHA via server.updateServer. */
 export function supportsForkServerUpdate(

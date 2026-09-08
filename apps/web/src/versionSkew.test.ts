@@ -26,6 +26,10 @@ import {
   shortForkRevision,
   supportsDesktopAppUpdate,
   supportsForkServerUpdate,
+  shouldOfferMainlineServerUpdate,
+  mainlineServerUpdateTargetVersion,
+  mainlineServerUpdateLabel,
+  forkServerUpdateLabel,
   manualForkInstallCommand,
 } from "./versionSkew";
 
@@ -304,6 +308,40 @@ describe("versionSkew", () => {
       }),
     ).toBe(true);
     expect(supportsForkServerUpdate(null)).toBe(false);
+  });
+
+  it("keeps official Update available to restore or upgrade mainline next to a fork update", () => {
+    branding.APP_VERSION = "0.0.38";
+    branding.APP_FORK_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
+    const forkServer = {
+      environment: {
+        environmentId: EnvironmentId.make("environment-linux"),
+        label: "Remote",
+        platform: { os: "linux" as const, arch: "x64" as const },
+        serverVersion: "0.0.38",
+        forkRevision: "fedcba9876543210fedcba9876543210fedcba98",
+        capabilities: { repositoryIdentity: true },
+      },
+    };
+    expect(shouldOfferMainlineServerUpdate(forkServer)).toBe(true);
+    expect(
+      shouldOfferMainlineServerUpdate({
+        environment: {
+          environmentId: EnvironmentId.make("environment-linux"),
+          label: "Remote",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "0.0.38",
+          capabilities: { repositoryIdentity: true },
+        },
+      }),
+    ).toBe(false);
+    expect(mainlineServerUpdateTargetVersion(forkServer)).toBe("0.0.38");
+    expect(mainlineServerUpdateLabel({ offerFork: true, failed: false })).toBe(
+      "Update to mainline",
+    );
+    expect(forkServerUpdateLabel({ offerMainline: true, failed: false })).toBe("Update fork");
+    expect(mainlineServerUpdateLabel({ offerFork: false, failed: false })).toBe("Update");
+    expect(forkServerUpdateLabel({ offerMainline: false, failed: true })).toBe("Retry");
   });
 
   it("copies a cwd-independent fork update command", () => {

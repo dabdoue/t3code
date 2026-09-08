@@ -98,6 +98,97 @@ persist_updater() {
   fi
 }
 
+prepend_path_if_dir() {
+  if [[ -d "$1" ]]; then
+    case ":$PATH:" in
+      *":$1:"*) ;;
+      *) PATH="$1:$PATH" ;;
+    esac
+  fi
+}
+
+# Non-interactive SSH has no nvm/fnm/.bashrc PATH. Same search as official
+# remote `t3` launches: well-known bins, then version managers.
+ensure_node_path() {
+  if command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+  prepend_path_if_dir "$HOME/.local/bin"
+  prepend_path_if_dir "$HOME/bin"
+  prepend_path_if_dir "/opt/homebrew/bin"
+  prepend_path_if_dir "/usr/local/bin"
+  prepend_path_if_dir "/usr/bin"
+  prepend_path_if_dir "/bin"
+  if command -v node >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [[ -z "${VOLTA_HOME:-}" ]]; then
+    VOLTA_HOME="$HOME/.volta"
+  fi
+  export VOLTA_HOME
+  prepend_path_if_dir "$VOLTA_HOME/bin"
+
+  prepend_path_if_dir "$HOME/.asdf/shims"
+  prepend_path_if_dir "$HOME/.asdf/bin"
+  if [[ ! -x "$HOME/.asdf/shims/node" && -s "$HOME/.asdf/asdf.sh" ]]; then
+    # shellcheck disable=SC1090
+    . "$HOME/.asdf/asdf.sh"
+  fi
+
+  prepend_path_if_dir "$HOME/.local/share/mise/shims"
+  prepend_path_if_dir "$HOME/.mise/shims"
+  if ! command -v node >/dev/null 2>&1 && command -v mise >/dev/null 2>&1; then
+    eval "$(mise activate bash)" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -z "${FNM_DIR:-}" ]]; then
+    FNM_DIR="$HOME/.local/share/fnm"
+  fi
+  export FNM_DIR
+  prepend_path_if_dir "$FNM_DIR"
+  prepend_path_if_dir "$HOME/.fnm"
+  if ! command -v node >/dev/null 2>&1 && command -v fnm >/dev/null 2>&1; then
+    eval "$(fnm env --shell bash)" >/dev/null 2>&1 || true
+    fnm use --silent-if-unchanged >/dev/null 2>&1 || fnm use default >/dev/null 2>&1 || true
+  fi
+
+  prepend_path_if_dir "$HOME/.nodenv/bin"
+  prepend_path_if_dir "$HOME/.nodenv/shims"
+  if ! command -v node >/dev/null 2>&1 && command -v nodenv >/dev/null 2>&1; then
+    eval "$(nodenv init -)" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -z "${NVM_DIR:-}" ]]; then
+    NVM_DIR="$HOME/.nvm"
+  fi
+  export NVM_DIR
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    local nvm_node=""
+    nvm_node="$(
+      set +euo pipefail
+      # shellcheck disable=SC1090
+      . "$NVM_DIR/nvm.sh"
+      nvm use --silent default >/dev/null 2>&1 || nvm use --silent node >/dev/null 2>&1 || nvm use --silent --lts >/dev/null 2>&1 || true
+      command -v node
+    )" || true
+    if [[ -n "$nvm_node" && -x "$nvm_node" ]]; then
+      PATH="$(dirname "$nvm_node"):$PATH"
+      export PATH
+    fi
+  fi
+  if ! command -v node >/dev/null 2>&1 && [[ -d "$NVM_DIR/versions/node" ]]; then
+    local bin
+    for bin in "$NVM_DIR"/versions/node/*/bin; do
+      if [[ -x "$bin/node" ]]; then
+        PATH="$bin:$PATH"
+        export PATH
+      fi
+    done
+  fi
+  command -v node >/dev/null 2>&1
+}
+
 boot_service_unit_file() {
   printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${BOOT_SERVICE_UNIT}"
 }
@@ -476,8 +567,9 @@ repo_url="${T3CODE_FORK_REPO_URL:-https://github.com/dabdoue/t3code.git}"
 desktop_entry="${T3CODE_FORK_DESKTOP_ENTRY:-}"
 
 if [[ "$restart_only" -eq 0 ]]; then
+  ensure_node_path || true
   if ! command -v node >/dev/null 2>&1; then
-    echo "Node.js is required on this machine" >&2
+    echo "Node.js is required on this machine. Install Node or a version manager (nvm, fnm, mise) that works in non-interactive SSH shells." >&2
     exit 1
   fi
 
@@ -709,6 +801,8 @@ stop_matching_scopes() {
 if [[ "$restart" -eq 0 ]]; then
   exit 0
 fi
+
+ensure_node_path || true
 
 if [[ "$install_kind" == "server" ]]; then
   if commit_boot_service; then

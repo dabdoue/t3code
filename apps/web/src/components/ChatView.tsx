@@ -437,13 +437,17 @@ import {
   dismissServerUpdateFailure,
   dismissVersionMismatch,
   FORK_MISMATCH_HINT,
+  forkServerUpdateLabel,
   isServerUpdateFailureDismissed,
   isVersionMismatchDismissed,
+  mainlineServerUpdateLabel,
+  mainlineServerUpdateTargetVersion,
   resolveForkRevisionMismatch,
   resolveServerConfigVersionMismatch,
   resolveServerSelfUpdateCapability,
   serverUpdateGuidance,
   shortForkRevision,
+  shouldOfferMainlineServerUpdate,
   supportsDesktopAppUpdate,
   supportsForkServerUpdate,
 } from "../versionSkew";
@@ -2429,7 +2433,10 @@ function ChatViewContent(props: ChatViewProps) {
                   selfUpdate={versionMismatchSelfUpdate}
                   desktopAppUpdate={versionMismatchDesktopAppUpdate}
                   targetVersion={versionMismatch.clientVersion}
-                  label={updateFailed ? "Retry" : "Update"}
+                  label={mainlineServerUpdateLabel({
+                    offerFork: forkMismatch !== null,
+                    failed: updateFailed,
+                  })}
                   variant="ghost"
                 />
               ) : null}
@@ -2440,13 +2447,10 @@ function ChatViewContent(props: ChatViewProps) {
                   sshTarget={forkSshTarget}
                   targetRevision={forkMismatch.clientRevision}
                   forkServerUpdate={versionMismatchForkServerUpdate}
-                  label={
-                    forkInstallState.status === "failed"
-                      ? "Retry"
-                      : versionMismatch
-                        ? "Update fork"
-                        : "Update"
-                  }
+                  label={forkServerUpdateLabel({
+                    offerMainline: versionMismatch !== null,
+                    failed: forkInstallState.status === "failed",
+                  })}
                   variant="ghost"
                 />
               ) : null}
@@ -2510,15 +2514,34 @@ function ChatViewContent(props: ChatViewProps) {
               : FORK_MISMATCH_HINT,
         actions:
           forkInstallState.status === "updating" ? undefined : (
-            <ForkInstallAction
-              environmentId={serverUpdateEnvironmentId}
-              serverLabel={versionMismatchServerLabel}
-              sshTarget={forkSshTarget}
-              targetRevision={forkMismatch.clientRevision}
-              forkServerUpdate={versionMismatchForkServerUpdate}
-              label={forkInstallState.status === "failed" ? "Retry" : "Update"}
-              variant="ghost"
-            />
+            <>
+              {shouldOfferMainlineServerUpdate(serverConfig) ? (
+                <ServerUpdateAction
+                  environmentId={serverUpdateEnvironmentId}
+                  serverLabel={versionMismatchServerLabel}
+                  selfUpdate={versionMismatchSelfUpdate}
+                  desktopAppUpdate={versionMismatchDesktopAppUpdate}
+                  targetVersion={mainlineServerUpdateTargetVersion(serverConfig)}
+                  label={mainlineServerUpdateLabel({
+                    offerFork: true,
+                    failed: serverUpdateState.status === "failed",
+                  })}
+                  variant="ghost"
+                />
+              ) : null}
+              <ForkInstallAction
+                environmentId={serverUpdateEnvironmentId}
+                serverLabel={versionMismatchServerLabel}
+                sshTarget={forkSshTarget}
+                targetRevision={forkMismatch.clientRevision}
+                forkServerUpdate={versionMismatchForkServerUpdate}
+                label={forkServerUpdateLabel({
+                  offerMainline: shouldOfferMainlineServerUpdate(serverConfig),
+                  failed: forkInstallState.status === "failed",
+                })}
+                variant="ghost"
+              />
+            </>
           ),
         ...(forkInstallState.status === "updating" || !forkMismatchDismissKey
           ? {}
@@ -2554,6 +2577,7 @@ function ChatViewContent(props: ChatViewProps) {
     forkInstallState,
     showForkMismatchBanner,
     setDismissedForkMismatchKey,
+    serverConfig,
   ]);
   const providerStatuses = serverConfig?.providers ?? EMPTY_PROVIDERS;
   const unlockedSelectedProvider = resolveSelectableProvider(

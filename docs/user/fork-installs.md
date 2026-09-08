@@ -8,11 +8,20 @@ Linux only. macOS and Windows are not supported here.
 
 ## Update from the app
 
-When this client and that Linux server disagree on fork git SHA, T3 Code shows **Update** (or
-**Update fork** next to official **Update**):
+When this client and that Linux server disagree on fork git SHA, T3 Code shows two separate
+actions:
+
+- **Update to mainline** — official T3 from npm or GitHub Releases, including restoring a fork
+  server back to stock `t3` at this client's version
+- **Update fork** — this fork at this client's git SHA
+
+They appear:
 
 - above the message box in the current conversation
 - **Settings** → **Connections**, beside the connection
+
+The official button stays available even when the version numbers already match, so a fork server
+can go back to mainline without waiting for a semver bump.
 
 Select the button. T3 Code uses the connection you already have. Servers that know how to install
 this fork do it over the same WebSocket path as official **Update**. Older Linux servers are updated

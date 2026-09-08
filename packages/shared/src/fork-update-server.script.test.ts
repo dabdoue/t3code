@@ -144,6 +144,51 @@ describe("fork-update-server AppImage discovery", () => {
     expect(NodeFS.existsSync(NodePath.join(t3Home, "runtime", "service-state.json"))).toBe(false);
   });
 
+  it("finds Node from nvm when PATH does not include it", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-nvm-"));
+    const clone = NodePath.join(home, "clone");
+    const t3Home = NodePath.join(home, ".t3");
+    const unit = NodePath.join(home, ".config", "systemd", "user", "t3code.service");
+    const dist = NodePath.join(clone, "apps", "server", "dist");
+    const nvmBin = NodePath.join(home, ".nvm", "versions", "node", "v24.13.1", "bin");
+    NodeFS.mkdirSync(NodePath.dirname(unit), { recursive: true });
+    NodeFS.mkdirSync(dist, { recursive: true });
+    NodeFS.mkdirSync(nvmBin, { recursive: true });
+    NodeFS.symlinkSync(process.execPath, NodePath.join(nvmBin, "node"));
+    NodeFS.writeFileSync(
+      unit,
+      [
+        "[Service]",
+        `Environment=T3CODE_HOME=${t3Home}`,
+        "ExecStart=/usr/bin/node /tmp/launcher.mjs",
+        "",
+      ].join("\n"),
+    );
+    NodeFS.writeFileSync(
+      NodePath.join(clone, "apps", "server", "package.json"),
+      JSON.stringify({
+        name: "t3",
+        version: "0.0.38",
+        type: "module",
+        bin: { t3: "./dist/bin.mjs" },
+      }),
+    );
+    NodeFS.writeFileSync(NodePath.join(dist, "bin.mjs"), "export {};\n");
+    NodeFS.writeFileSync(NodePath.join(dist, "service-launcher.mjs"), "export {};\n");
+    const script = NodeFS.readFileSync(SCRIPT, "utf8");
+    expect(script).toContain("ensure_node_path");
+    expect(script).toContain("NVM_DIR");
+    const result = runPrint(home, ["abcdef0123456789abcdef0123456789abcdef01", "--no-restart"], {
+      PATH: "/usr/bin:/bin",
+      T3CODE_FORK_CLONE: clone,
+      T3CODE_FORK_SKIP_FETCH: "1",
+      T3CODE_HOME: t3Home,
+    });
+    expect(result.stderr ?? "").not.toMatch(/Node\.js is required/u);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("kind=server");
+  });
+
   it("does not invent an AppImage when only a server could exist", () => {
     const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-none-"));
     const result = runPrint(home, ["--print-install"]);
