@@ -488,6 +488,44 @@ function selectedClaudeContextWindow(
   return resolveClaudeCatalogContextWindowTokens(catalog, modelSelection);
 }
 
+const CLAUDE_STANDARD_CONTEXT_WINDOW_TOKENS = 200_000;
+
+/**
+ * Native 1M Claude models still launch at 1M when the unsuffixed ID is sent.
+ * Claude Code's 200k hold is `CLAUDE_CODE_DISABLE_1M_CONTEXT`, not a model suffix.
+ */
+function claudeSessionUsesStandardContextWindow(contextWindowTokens: number | undefined): boolean {
+  return contextWindowTokens === CLAUDE_STANDARD_CONTEXT_WINDOW_TOKENS;
+}
+
+function claudeSessionEnvironment(
+  baseEnv: NodeJS.ProcessEnv,
+  contextWindowTokens: number | undefined,
+): NodeJS.ProcessEnv {
+  if (!claudeSessionUsesStandardContextWindow(contextWindowTokens)) {
+    return baseEnv;
+  }
+  return {
+    ...baseEnv,
+    CLAUDE_CODE_DISABLE_1M_CONTEXT: "1",
+  };
+}
+
+function claudeSessionAutoCompactWindow(
+  configuredWindow: string,
+  contextWindowTokens: number | undefined,
+): number | undefined {
+  const configured = configuredWindow ? Number(configuredWindow) : undefined;
+  const validConfigured =
+    configured !== undefined && Number.isFinite(configured) ? configured : undefined;
+  if (claudeSessionUsesStandardContextWindow(contextWindowTokens)) {
+    return validConfigured !== undefined
+      ? Math.min(validConfigured, CLAUDE_STANDARD_CONTEXT_WINDOW_TOKENS)
+      : CLAUDE_STANDARD_CONTEXT_WINDOW_TOKENS;
+  }
+  return validConfigured;
+}
+
 function finiteNonNegativeInteger(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.round(value)
@@ -4351,14 +4389,17 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         "full-access": "bypassPermissions",
       };
       const permissionMode = runtimeModeToPermission[input.runtimeMode];
+      const autoCompactWindow = claudeSessionAutoCompactWindow(
+        claudeSettings.autoCompactWindow,
+        initialContextWindow,
+      );
       const settings = {
         ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
         ...(fastMode ? { fastMode: true } : {}),
         ...(ultracode ? { ultracode: true } : {}),
-        ...(claudeSettings.autoCompactWindow
-          ? { autoCompactWindow: Number(claudeSettings.autoCompactWindow) }
-          : {}),
+        ...(autoCompactWindow !== undefined ? { autoCompactWindow } : {}),
       };
+      const sessionEnvironment = claudeSessionEnvironment(claudeEnvironment, initialContextWindow);
       const mcpSession = McpProviderSession.readMcpProviderSession(input.threadId);
       // The attachments dir grant lets the agent Read/copy pasted images at
       // the paths ProviderService injects into the turn text, without an
@@ -4392,7 +4433,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         canUseTool,
         onUserDialog,
         supportedDialogKinds: ["resume_return"],
-        env: claudeEnvironment,
+        env: sessionEnvironment,
         additionalDirectories,
         ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
         ...(mcpSession

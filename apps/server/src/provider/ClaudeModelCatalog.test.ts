@@ -7,9 +7,11 @@ import {
   formatClaudeVersionUpgradeMessage,
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
+  resolveClaudeCatalogContextWindowTokens,
   resolveClaudeModelCatalog,
   resolveClaudeModelsForVersion,
   resolveClaudeModelSlug,
+  scopeClaudeModelCatalog,
 } from "./ClaudeModelCatalog.ts";
 
 /**
@@ -133,5 +135,49 @@ describe("Claude model catalog", () => {
       },
     };
     assert.isFalse(hasValidClaudeManifestAdapters(malformed));
+  });
+
+  it("gives custom Claude Code models effort and context dispatch without rewriting built-ins", () => {
+    const catalog = scopeClaudeModelCatalog(resolveClaudeModelCatalog(manifest()), [
+      "glm-4.7",
+      "synthetic",
+    ]);
+
+    assert.strictEqual(resolveClaudeModelSlug(catalog, "synthetic"), "synthetic");
+    assert.strictEqual(
+      resolveClaudeModelSlug(catalog, "claude-synthetic-next"),
+      "claude-synthetic-next",
+    );
+    assert.strictEqual(
+      resolveClaudeCatalogApiModelId(catalog, {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "glm-4.7",
+        options: [{ id: "contextWindow", value: "1m" }],
+      }),
+      "glm-4.7[1m]",
+    );
+    assert.strictEqual(
+      resolveClaudeCatalogApiModelId(catalog, {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "glm-4.7",
+        options: [{ id: "contextWindow", value: "200k" }],
+      }),
+      "glm-4.7",
+    );
+    assert.strictEqual(
+      resolveClaudeCatalogContextWindowTokens(catalog, {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "glm-4.7",
+        options: [{ id: "contextWindow", value: "200k" }],
+      }),
+      200_000,
+    );
+    assert.strictEqual(
+      resolveClaudeCatalogApiModelId(catalog, {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-synthetic-next",
+      }),
+      "claude-synthetic-next[large]",
+    );
   });
 });

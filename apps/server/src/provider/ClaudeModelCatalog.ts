@@ -6,6 +6,7 @@ import {
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import {
+  createModelCapabilities,
   getModelSelectionStringOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
@@ -27,6 +28,54 @@ import {
 
 const CLAUDE = ProviderDriverKind.make("claudeAgent");
 const EMPTY_CAPABILITIES: ModelCapabilities = { optionDescriptors: [] };
+
+/** Shared by custom Claude Code models (routers, GLM, OpenRouter IDs, and similar). */
+export const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  optionDescriptors: [
+    {
+      id: "effort",
+      label: "Reasoning",
+      type: "select",
+      options: [
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium" },
+        { id: "high", label: "High", isDefault: true },
+        { id: "xhigh", label: "Extra High" },
+        { id: "max", label: "Max" },
+        { id: "ultrathink", label: "Ultrathink" },
+      ],
+      promptInjectedValues: ["ultrathink"],
+    },
+    {
+      id: "contextWindow",
+      label: "Context Window",
+      type: "select",
+      options: [
+        { id: "200k", label: "200k", isDefault: true },
+        { id: "1m", label: "1M" },
+      ],
+    },
+  ],
+});
+
+const DEFAULT_CLAUDE_CODE_RUNTIME: ClaudeCodeProfile = {
+  effortMap: { ultrathink: null },
+  modelSuffixes: { contextWindow: { "1m": "[1m]" } },
+  contextWindowTokens: { "200k": 200_000, "1m": 1_000_000 },
+};
+
+function makeCustomClaudeCatalogModel(slug: string): ClaudeCatalogModel {
+  return {
+    model: {
+      slug,
+      name: slug,
+      isCustom: true,
+      capabilities: DEFAULT_CLAUDE_MODEL_CAPABILITIES,
+    },
+    runtime: DEFAULT_CLAUDE_CODE_RUNTIME,
+    compatibility: {},
+  };
+}
 
 export interface ClaudeCatalogModel {
   readonly model: ServerProviderModel;
@@ -70,32 +119,43 @@ export function resolveClaudeModelCatalog(manifest: ModelManifestData): ClaudeMo
 
 export const BUNDLED_CLAUDE_MODEL_CATALOG = resolveClaudeModelCatalog(BUNDLED_MODEL_MANIFEST);
 
-/** Keeps custom model aliases opaque while preserving canonical built-in models and capabilities. */
+/** Keeps custom model aliases opaque while giving them Claude Code effort and context controls. */
 export function scopeClaudeModelCatalog(
   catalog: ClaudeModelCatalog,
   customModels: ReadonlyArray<string>,
 ): ClaudeModelCatalog {
-  const customAliases = new Set(
-    customModels.flatMap((model) => {
-      const slug = normalizeCustomModelSlug(model);
-      return slug ? [slug.toLowerCase()] : [];
-    }),
-  );
-  if (customAliases.size === 0) return catalog;
+  const customSlugs: string[] = [];
+  const seenCustomSlugs = new Set<string>();
+  for (const model of customModels) {
+    const slug = normalizeCustomModelSlug(model);
+    if (!slug) continue;
+    const key = slug.toLowerCase();
+    if (seenCustomSlugs.has(key)) continue;
+    seenCustomSlugs.add(key);
+    customSlugs.push(slug);
+  }
+  if (customSlugs.length === 0) return catalog;
+
+  const customAliasSet = new Set(customSlugs.map((slug) => slug.toLowerCase()));
+  const builtIns = catalog.models.map((entry) => {
+    if (!entry.model.aliases?.some((alias) => customAliasSet.has(alias.toLowerCase()))) {
+      return entry;
+    }
+    return {
+      ...entry,
+      model: {
+        ...entry.model,
+        aliases: entry.model.aliases.filter((alias) => !customAliasSet.has(alias.toLowerCase())),
+      },
+    };
+  });
+  const builtInSlugs = new Set(builtIns.map((entry) => entry.model.slug.toLowerCase()));
+  const customEntries = customSlugs
+    .filter((slug) => !builtInSlugs.has(slug.toLowerCase()))
+    .map(makeCustomClaudeCatalogModel);
 
   return {
-    models: catalog.models.map((entry) => {
-      if (!entry.model.aliases?.some((alias) => customAliases.has(alias.toLowerCase()))) {
-        return entry;
-      }
-      return {
-        ...entry,
-        model: {
-          ...entry.model,
-          aliases: entry.model.aliases.filter((alias) => !customAliases.has(alias.toLowerCase())),
-        },
-      };
-    }),
+    models: [...builtIns, ...customEntries],
   };
 }
 

@@ -471,6 +471,106 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("holds native 1M Claude models to 200k when that context window is selected", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [{ id: "contextWindow", value: "standard" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.model, SYNTHETIC_CLAUDE_CAPABLE_MODEL);
+      assert.equal(options?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1");
+      assert.deepEqual(options?.settings, { autoCompactWindow: 200000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("does not hold Claude sessions to 200k when the 1M context window is selected", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          SYNTHETIC_CLAUDE_CAPABLE_MODEL,
+          [{ id: "contextWindow", value: "expanded" }],
+        ),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.model, `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`);
+      assert.equal(options?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined);
+      assert.equal(options?.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("forwards effort and 1M context for custom Claude Code models", () => {
+    const harness = makeHarness({ claudeConfig: { customModels: ["glm-4.7"] } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(ProviderInstanceId.make("claudeAgent"), "glm-4.7", [
+          { id: "effort", value: "low" },
+          { id: "contextWindow", value: "1m" },
+        ]),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.model, "glm-4.7[1m]");
+      assert.equal(options?.effort, "low");
+      assert.equal(options?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, undefined);
+      assert.equal(options?.settings, undefined);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("holds custom Claude Code models to 200k when that context window is selected", () => {
+    const harness = makeHarness({ claudeConfig: { customModels: ["glm-4.7"] } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(ProviderInstanceId.make("claudeAgent"), "glm-4.7", [
+          { id: "effort", value: "high" },
+          { id: "contextWindow", value: "200k" },
+        ]),
+        runtimeMode: "full-access",
+      });
+
+      const options = harness.getLastCreateQueryInput()?.options;
+      assert.equal(options?.model, "glm-4.7");
+      assert.equal(options?.effort, "high");
+      assert.equal(options?.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1");
+      assert.deepEqual(options?.settings, { autoCompactWindow: 200000 });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("forwards claude effort levels into query options", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {
@@ -690,13 +790,14 @@ describe("ClaudeAdapterLive", () => {
       return Effect.gen(function* () {
         const { options: customOptions, prompt: customPrompt } = yield* runCustomFlow;
         assert.equal(customOptions.model, SYNTHETIC_CLAUDE_COLLIDING_ALIAS);
-        assert.equal(customOptions.effort, undefined);
-        assert.equal(customOptions.settings, undefined);
+        assert.equal(customOptions.effort, "max");
+        assert.equal(customOptions.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT, "1");
+        assert.deepEqual(customOptions.settings, { autoCompactWindow: 200000 });
         assert.deepEqual(customHarness.query.setModelCalls, [
           `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`,
           SYNTHETIC_CLAUDE_COLLIDING_ALIAS,
         ]);
-        assert.equal(customPrompt, "keep this prompt literal");
+        assert.equal(customPrompt, "Ultrathink:\nkeep this prompt literal");
 
         const builtInOptions = yield* start(builtInHarness, SYNTHETIC_CLAUDE_CAPABLE_MODEL);
         assert.equal(builtInOptions.model, `${SYNTHETIC_CLAUDE_CAPABLE_MODEL}[expanded]`);

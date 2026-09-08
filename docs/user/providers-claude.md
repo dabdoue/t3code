@@ -41,6 +41,10 @@ In Settings, open your Claude provider and set **Auto-compact after** to a token
 reaches about 300,000 tokens, without changing the model's context window. Leave the field
 empty to keep Claude Code's default behavior.
 
+The composer also has a **Context Window** picker on Claude models. **200k** holds the session
+to a 200,000-token window, including models whose native size is 1M. **1M** uses the extended
+window. Changing this on a thread that is already running takes effect on the next new thread.
+
 On web and desktop, when you return to an older Claude thread with a large context, T3 Code
 offers to compact the conversation before you continue. You can also select **Compact context**
 from the context meter. On every client, you can enter `/compact` in the message composer, and
@@ -234,3 +238,19 @@ If the preset needs different Claude files, give it a different `CLAUDE_CONFIG_D
 different API keys, base URLs, or router settings, use Environment variables.
 
 Do not put environment variable assignments in `Launch arguments`.
+
+## I Want A Custom Model On Claude Code
+
+Use this when Claude Code should call a model that is not in the built-in Claude list, such as a
+GLM, OpenRouter, or router model ID.
+
+Add the model ID in that Claude provider's **Custom models** list. T3 Code keeps the ID as you
+typed it, and the composer shows **Reasoning** and **Context Window** for it, the same way it does
+for built-in Claude models.
+
+**200k** is the default for custom models. Pick **1M** when the endpoint and Claude Code should use
+the extended window.
+
+If you already switch Claude Code with a shell alias that exports `ANTHROPIC_BASE_URL` and an API
+token, move those same values into the Claude provider's Environment variables section instead of
+relying on the alias. T3 Code does not load shell aliases when it starts Claude Code.
