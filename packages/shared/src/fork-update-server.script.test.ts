@@ -189,6 +189,64 @@ describe("fork-update-server AppImage discovery", () => {
     expect(result.stdout).toContain("kind=server");
   });
 
+  it("installs Vite+ with npm when vp is not on PATH", () => {
+    const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-vp-"));
+    const t3Home = NodePath.join(home, ".t3");
+    const unit = NodePath.join(home, ".config", "systemd", "user", "t3code.service");
+    const stubBin = NodePath.join(home, "stub-bin");
+    NodeFS.mkdirSync(NodePath.dirname(unit), { recursive: true });
+    NodeFS.mkdirSync(stubBin, { recursive: true });
+    NodeFS.symlinkSync(process.execPath, NodePath.join(stubBin, "node"));
+    NodeFS.writeFileSync(
+      NodePath.join(stubBin, "npm"),
+      [
+        "#!/bin/bash",
+        'prefix=""',
+        "while (($#)); do",
+        '  case "$1" in',
+        '    --prefix) prefix="$2"; shift 2 ;;',
+        "    *) shift ;;",
+        "  esac",
+        "done",
+        'if [[ -z "$prefix" ]]; then',
+        '  echo "missing --prefix" >&2',
+        "  exit 1",
+        "fi",
+        'mkdir -p "$prefix/bin" "$prefix/node_modules/.bin"',
+        'printf "%s\\n" "#!/bin/bash" "echo vp-ok" > "$prefix/node_modules/.bin/vp"',
+        'chmod +x "$prefix/node_modules/.bin/vp"',
+        "",
+      ].join("\n"),
+    );
+    NodeFS.chmodSync(NodePath.join(stubBin, "npm"), 0o755);
+    NodeFS.writeFileSync(
+      unit,
+      [
+        "[Service]",
+        `Environment=T3CODE_HOME=${t3Home}`,
+        "ExecStart=/usr/bin/node /tmp/launcher.mjs",
+        "",
+      ].join("\n"),
+    );
+    const script = NodeFS.readFileSync(SCRIPT, "utf8");
+    expect(script).toContain("ensure_vp");
+    expect(script).toContain("vite-plus");
+    expect(script).not.toMatch(/missing Vite\+ \(vp\); install it/u);
+    const result = runPrint(home, ["abcdef0123456789abcdef0123456789abcdef01"], {
+      PATH: `${stubBin}:/usr/bin:/bin`,
+      T3CODE_HOME: t3Home,
+      T3CODE_FORK_TEST_ENSURE_VP: "1",
+    });
+    expect(result.stderr ?? "").not.toMatch(/missing Vite\+/u);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toMatch(/vp=.+\/runtime\/fork-tools\/node_modules\/\.bin\/vp/u);
+    expect(
+      NodeFS.existsSync(
+        NodePath.join(t3Home, "runtime", "fork-tools", "node_modules", ".bin", "vp"),
+      ),
+    ).toBe(true);
+  });
+
   it("does not invent an AppImage when only a server could exist", () => {
     const home = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-none-"));
     const result = runPrint(home, ["--print-install"]);

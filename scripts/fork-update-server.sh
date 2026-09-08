@@ -189,6 +189,59 @@ ensure_node_path() {
   command -v node >/dev/null 2>&1
 }
 
+# Official `t3 service update` only needs npm. Fork builds need Vite+ (`vp`).
+# Non-interactive SSH often has Node/npm (after ensure_node_path) but no global
+# `vp`. Install it under $T3CODE_HOME/runtime/fork-tools, not userdata.
+ensure_vp() {
+  if command -v vp >/dev/null 2>&1; then
+    return 0
+  fi
+  local node_bin=""
+  node_bin="$(command -v node 2>/dev/null || true)"
+  if [[ -n "$node_bin" ]]; then
+    prepend_path_if_dir "$(dirname "$node_bin")"
+  fi
+  prepend_path_if_dir "$HOME/.local/bin"
+  if [[ -n "${clone:-}" ]]; then
+    prepend_path_if_dir "$clone/node_modules/.bin"
+  fi
+  if command -v vp >/dev/null 2>&1; then
+    return 0
+  fi
+  if ! command -v npm >/dev/null 2>&1; then
+    echo "npm is required to install Vite+ (vp) on this machine" >&2
+    return 1
+  fi
+
+  local tools=""
+  tools="$(resolve_t3code_home)/runtime/fork-tools"
+  refuse_userdata "$tools" "fork-tools"
+  mkdir -p "$tools"
+  prepend_path_if_dir "$tools/bin"
+  prepend_path_if_dir "$tools/node_modules/.bin"
+  if command -v vp >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "installing Vite+ (vp) with npm into $tools"
+  npm install --prefix "$tools" --no-fund --no-audit vite-plus
+  prepend_path_if_dir "$tools/bin"
+  prepend_path_if_dir "$tools/node_modules/.bin"
+  if command -v vp >/dev/null 2>&1; then
+    return 0
+  fi
+  if command -v npx >/dev/null 2>&1; then
+    mkdir -p "$tools/bin"
+    cat >"$tools/bin/vp" <<'EOF'
+#!/bin/bash
+exec npx --yes vite-plus "$@"
+EOF
+    chmod +x "$tools/bin/vp"
+    prepend_path_if_dir "$tools/bin"
+  fi
+  command -v vp >/dev/null 2>&1
+}
+
 boot_service_unit_file() {
   printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${BOOT_SERVICE_UNIT}"
 }
@@ -573,6 +626,15 @@ if [[ "$restart_only" -eq 0 ]]; then
     exit 1
   fi
 
+  if [[ "${T3CODE_FORK_TEST_ENSURE_VP:-}" == "1" ]]; then
+    ensure_vp || {
+      echo "Vite+ (vp) is required to build this fork. Node/npm could not install it." >&2
+      exit 1
+    }
+    echo "vp=$(command -v vp)"
+    exit 0
+  fi
+
   if [[ "${T3CODE_FORK_SKIP_FETCH:-}" != "1" ]]; then
     if ! command -v git >/dev/null 2>&1; then
       echo "git is required" >&2
@@ -608,14 +670,12 @@ if [[ "$restart_only" -eq 0 ]]; then
   fi
 
   if [[ "${T3CODE_FORK_SKIP_FETCH:-}" != "1" ]]; then
-    if [[ ! -x "$clone/node_modules/.bin/vp" ]]; then
-      if command -v vp >/dev/null 2>&1; then
-        (cd "$clone" && vp i)
-      else
-        echo "missing Vite+ (vp); install it, then run: (cd $clone && vp i)" >&2
-        exit 1
-      fi
-    fi
+    ensure_vp || {
+      echo "Vite+ (vp) is required to build this fork. Node/npm could not install it." >&2
+      exit 1
+    }
+    echo "vp=$(command -v vp)"
+    (cd "$clone" && vp i)
   fi
 
   helper_dir=""

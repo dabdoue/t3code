@@ -47,8 +47,9 @@ you are installing does not need to contain that script. It clones into `$HOME/s
   desktop entry, `~/Applications`, then a running AppImage process. Set `T3CODE_FORK_APPIMAGE` only
   if it lives somewhere those checks miss.
 - **Server only** — no AppImage is required. If `t3code.service` is installed (the same
-  background service official **Update** uses), the updater builds the `t3` CLI from that SHA,
-  pins it under `$T3CODE_HOME/runtime/versions` the way `t3 service update` does, then restarts
+  background service official **Update** uses), the updater builds the `t3` CLI from that SHA.
+  Node and npm are enough; Vite+ (`vp`) is installed automatically if it is missing. The updater
+  pins the CLI under `$T3CODE_HOME/runtime/versions` the way `t3 service update` does, then restarts
   the service. The stable launcher stays in place; the script does not rewrite `ExecStart` or
   install a desktop app. A host with only a running `t3 serve` / `t3` process and no unit gets
   that process replaced. Point the service back at official `t3` later with
