@@ -13,8 +13,10 @@ import {
   collectLimitsAccounts,
   elapsedShare,
   formatResetsIn,
+  hasLimitsData,
   limitsNotice,
   paceOf,
+  partitionByLimitsData,
   providersWithLimits,
 } from "./usageLimits.ts";
 
@@ -87,6 +89,20 @@ describe("limitsNotice", () => {
         unavailable: { reason: "probeFailed", message: "Codex timed out." },
       }),
     ).toBe("Codex timed out.");
+  });
+});
+
+describe("partitionByLimitsData", () => {
+  it("groups accounts without windows away from those with bars", () => {
+    const checkedAt = "2026-09-03T11:00:00.000Z";
+    const withWindows = { id: "with", limits: { checkedAt, windows: [window] } };
+    const missing = { id: "missing", limits: undefined };
+    const empty = { id: "empty", limits: { checkedAt, windows: [] } };
+    const partitioned = partitionByLimitsData([withWindows, missing, empty], (item) => item.limits);
+    expect(partitioned.withLimits.map((item) => item.id)).toEqual(["with"]);
+    expect(partitioned.withoutLimits.map((item) => item.id)).toEqual(["missing", "empty"]);
+    expect(hasLimitsData(withWindows.limits)).toBe(true);
+    expect(hasLimitsData(undefined)).toBe(false);
   });
 });
 

@@ -12,8 +12,8 @@ The **Limits** view shows how much of each subscription window you have used on 
 Code, and Cursor. It unions every connected environment into one list. Machine names appear on
 each row when more than one environment is connected. The same signed-in account on two machines
 shares one set of bars, labeled with those machine names. Distinct accounts stay on their own
-rows. A connected machine that has not reported quota yet still appears, either merged into the
-matching account or with a note that its windows are missing. Refresh re-probes every connected
+rows. Accounts that have not reported quota yet are grouped together and collapsed by default, so
+the bars you can act on stay in front. Refresh re-probes every connected
 environment. Codex and Claude
 Code report session and weekly windows, plus a per-model weekly window such as Fable when your
 plan has one. Cursor reports the two included monthly pools from its Spending page: Cursor

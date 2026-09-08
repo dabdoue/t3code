@@ -18,9 +18,10 @@ import {
   limitsNotice,
   type LimitPace,
   paceOf,
+  partitionByLimitsData,
   providerLimitsLabel,
 } from "@t3tools/shared/usageLimits";
-import { GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
+import { ChevronRightIcon, GaugeIcon, TrendingDownIcon, TrendingUpIcon } from "lucide-react";
 import { Fragment, useState } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
@@ -41,6 +42,7 @@ import {
   AlertDialogTitle,
 } from "../ui/alert-dialog";
 import { Button } from "../ui/button";
+import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { PROVIDER_PRESENTATION } from "./usageProviders";
 
@@ -449,6 +451,45 @@ export function UsageLimitsSection() {
   const presentations = useAtomValue(environmentPresentations.presentationsAtom);
   const accounts = collectLimitsAccounts(presentations);
   const sources = collectLimitSources(presentations);
+  const { withLimits, withoutLimits } = partitionByLimitsData(
+    accounts,
+    (account) => account.provider.usageLimits,
+  );
+  const sourceRows = sources.flatMap((source) => {
+    if (source.error) {
+      return [
+        {
+          kind: "source" as const,
+          source,
+          accountsWithLimits: [] as const,
+          accountsWithoutLimits: [] as const,
+        },
+      ];
+    }
+    const partitioned = partitionByLimitsData(source.accounts, (account) => account.usageLimits);
+    return [
+      {
+        kind: "source" as const,
+        source: { ...source, accounts: partitioned.withLimits },
+        accountsWithLimits: partitioned.withLimits,
+        accountsWithoutLimits: partitioned.withoutLimits,
+      },
+    ];
+  });
+  const visibleSources = sourceRows.filter(
+    (row) =>
+      row.source.error ||
+      row.accountsWithLimits.length > 0 ||
+      (row.source.accounts.length === 0 && row.accountsWithoutLimits.length === 0),
+  );
+  const sourceAccountsWithoutLimits = sourceRows.flatMap((row) =>
+    row.accountsWithoutLimits.map((account) => ({
+      key: `${row.source.key}:${account.id}`,
+      account,
+      sourceKind: SOURCE_KIND_LABEL[row.source.kind],
+    })),
+  );
+  const noDataCount = withoutLimits.length + sourceAccountsWithoutLimits.length;
   // Anchored once per mount on purpose: countdowns must not tick (see below).
   const [now] = useState(() => Date.now());
   const missingMachines =
@@ -476,10 +517,10 @@ export function UsageLimitsSection() {
           {missingMachines.length === 1 ? " has" : " have"} not reported a provider with quota.
         </p>
       ) : null}
-      {sources.map((source) => (
-        <SourceLimits key={source.key} source={source} now={now} />
+      {visibleSources.map((row) => (
+        <SourceLimits key={row.source.key} source={row.source} now={now} />
       ))}
-      {accounts.map((account) => (
+      {withLimits.map((account) => (
         <ProviderLimits
           key={account.key}
           provider={account.provider}
@@ -488,6 +529,37 @@ export function UsageLimitsSection() {
           now={now}
         />
       ))}
+      {noDataCount > 0 ? (
+        <Collapsible defaultOpen={false} className="flex flex-col gap-3">
+          <CollapsibleTrigger className="group flex w-fit items-center gap-2 text-xs text-muted-foreground hover:text-foreground">
+            <ChevronRightIcon className="size-3.5 transition-transform duration-200 group-data-panel-open:rotate-90" />
+            {noDataCount === 1
+              ? "1 account with no limits data"
+              : `${noDataCount} accounts with no limits data`}
+          </CollapsibleTrigger>
+          <CollapsiblePanel>
+            <div className="flex flex-col gap-8 pt-3">
+              {sourceAccountsWithoutLimits.map((row) => (
+                <SourceAccountLimits
+                  key={row.key}
+                  account={row.account}
+                  sourceKind={row.sourceKind}
+                  now={now}
+                />
+              ))}
+              {withoutLimits.map((account) => (
+                <ProviderLimits
+                  key={account.key}
+                  provider={account.provider}
+                  environmentId={account.environmentId}
+                  presenceLabel={account.presenceLabel}
+                  now={now}
+                />
+              ))}
+            </div>
+          </CollapsiblePanel>
+        </Collapsible>
+      ) : null}
     </div>
   );
 }

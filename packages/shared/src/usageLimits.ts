@@ -245,6 +245,23 @@ export function collectLimitSources(
   );
 }
 
+/** True when there are bars to draw: a notice means the row has no quota data. */
+export function hasLimitsData(limits: ServerProviderUsageLimits | undefined): boolean {
+  return limitsNotice(limits) === null;
+}
+
+export function partitionByLimitsData<T>(
+  items: readonly T[],
+  limitsOf: (item: T) => ServerProviderUsageLimits | undefined,
+): { readonly withLimits: readonly T[]; readonly withoutLimits: readonly T[] } {
+  const withLimits: T[] = [];
+  const withoutLimits: T[] = [];
+  for (const item of items) {
+    (hasLimitsData(limitsOf(item)) ? withLimits : withoutLimits).push(item);
+  }
+  return { withLimits, withoutLimits };
+}
+
 function accountKey(driver: ServerProvider["driver"], email: string | undefined): string | null {
   const normalizedEmail = email?.trim().toLowerCase();
   return normalizedEmail ? `${driver}:${normalizedEmail}` : null;
