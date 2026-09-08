@@ -20,11 +20,9 @@ import {
   isForkUpdateScriptSource,
   normalizeForkRevision,
 } from "@t3tools/shared/forkRevision";
-import {
-  collectProcessOutput,
-  getLastNonEmptyOutputLine,
-  runSshCommand,
-} from "@t3tools/ssh/command";
+import { collectProcessOutput, getLastNonEmptyOutputLine } from "@t3tools/ssh/command";
+
+import * as DesktopSshEnvironment from "../ssh/DesktopSshEnvironment.ts";
 
 const LOCAL_PUSH_TIMEOUT_MS = 120_000;
 const REMOTE_INSTALL_TIMEOUT_MS = 45 * 60 * 1000;
@@ -76,9 +74,12 @@ export function buildRemoteForkInstallCommand(sha: string): string {
 function localForkUpdateScriptCandidates(env: NodeJS.ProcessEnv): string[] {
   const configuredScript = env.T3CODE_FORK_UPDATE_SCRIPT?.trim() ?? "";
   const checkout = env.T3CODE_FORK_CHECKOUT?.trim() ?? "";
+  const resources = env.T3CODE_RESOURCES_PATH?.trim() || process.resourcesPath?.trim() || "";
   return [
     configuredScript,
     checkout.length > 0 ? NodePath.join(checkout, "scripts", "fork-update-server.sh") : "",
+    resources.length > 0 ? NodePath.join(resources, "fork-update-server.sh") : "",
+    resources.length > 0 ? NodePath.join(resources, "scripts", "fork-update-server.sh") : "",
   ].filter((candidate) => candidate.length > 0);
 }
 
@@ -190,29 +191,95 @@ export const pushForkHead = Effect.fn("desktop.forkSync.pushHead")(function* () 
   return { sha } satisfies DesktopForkPushHeadResult;
 });
 
+export function sshTargetMatchesHint(target: DesktopSshEnvironmentTarget, hint: string): boolean {
+  const normalizedHint = hint
+    .trim()
+    .toLowerCase()
+    .replace(/\s+server$/u, "");
+  if (normalizedHint.length === 0) {
+    return false;
+  }
+  const candidates = [
+    target.alias,
+    target.hostname,
+    target.username ?? "",
+    target.username ? `${target.username}@${target.alias}` : "",
+    target.username ? `${target.username}@${target.hostname}` : "",
+  ]
+    .map((value) => value.trim().toLowerCase())
+    .filter((value) => value.length > 0);
+  return candidates.some(
+    (candidate) =>
+      normalizedHint === candidate ||
+      normalizedHint.includes(candidate) ||
+      candidate.includes(normalizedHint),
+  );
+}
+
+export function resolveDesktopForkSshTarget(input: {
+  readonly target?: DesktopSshEnvironmentTarget;
+  readonly label?: string;
+  readonly activeTargets: ReadonlyArray<DesktopSshEnvironmentTarget>;
+}): DesktopSshEnvironmentTarget | null {
+  if (input.target !== undefined) {
+    return input.target;
+  }
+  const hint = input.label ?? "";
+  const matches = input.activeTargets.filter((target) => sshTargetMatchesHint(target, hint));
+  if (matches.length === 1) {
+    return matches[0] ?? null;
+  }
+  if (input.activeTargets.length === 1) {
+    return input.activeTargets[0] ?? null;
+  }
+  return null;
+}
+
 export const installForkAppImage = Effect.fn("desktop.forkSync.install")(function* (input: {
-  readonly target: DesktopSshEnvironmentTarget;
   readonly sha: string;
+  readonly target?: DesktopSshEnvironmentTarget;
+  readonly environmentId?: string;
+  readonly label?: string;
 }) {
   const sha = normalizeForkRevision(input.sha);
   if (sha === null) {
     return yield* new DesktopForkSyncError({ reason: `Invalid git SHA: ${input.sha}` });
   }
+  const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+  const activeTargets = yield* sshEnvironment.listActiveTargets();
+  const target = resolveDesktopForkSshTarget({
+    ...(input.target === undefined ? {} : { target: input.target }),
+    ...(input.label === undefined ? {} : { label: input.label }),
+    activeTargets,
+  });
+  if (target === null) {
+    const host = input.label?.trim() || input.environmentId || "that server";
+    if (activeTargets.length === 0) {
+      return yield* new DesktopForkSyncError({
+        reason: `No SSH session is open to ${host}. Connect over SSH from this app, then try Update again.`,
+      });
+    }
+    return yield* new DesktopForkSyncError({
+      reason: `Could not tell which SSH session belongs to ${host}. Keep that machine connected over SSH and try Update again.`,
+    });
+  }
   const localScript = yield* readLocalForkUpdateScript();
-  const result = yield* runSshCommand(input.target, {
-    ...(localScript === null
-      ? { remoteCommandArgs: ["bash", "-lc", buildRemoteForkInstallCommand(sha)] }
-      : { remoteCommandArgs: ["bash", "-s", "--", sha], stdin: localScript }),
-    timeoutMs: REMOTE_INSTALL_TIMEOUT_MS,
-    preHostArgs: ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120"],
-  }).pipe(
-    Effect.mapError(
-      (cause) =>
-        new DesktopForkSyncError({
-          reason: cause.message,
-        }),
-    ),
-  );
+  const result = yield* sshEnvironment
+    .runRemoteCommand(target, {
+      ...(localScript === null
+        ? { remoteCommandArgs: ["bash", "-lc", buildRemoteForkInstallCommand(sha)] }
+        : { remoteCommandArgs: ["bash", "-s", "--", sha], stdin: localScript }),
+      timeoutMs: REMOTE_INSTALL_TIMEOUT_MS,
+      preHostArgs: ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120"],
+    })
+    .pipe(
+      Effect.mapError(
+        (cause) =>
+          new DesktopForkSyncError({
+            reason: cause.message,
+          }),
+      ),
+    );
   return {
     sha,
     logTail: tailOutput(`${result.stdout}\n${result.stderr}`),

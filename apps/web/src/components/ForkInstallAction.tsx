@@ -6,8 +6,14 @@ import {
 import type { ComponentProps } from "react";
 
 import { requestConfirmDialog } from "~/confirmDialog";
-import { forkInstallFailureMessage, setForkInstallState, useForkInstallState } from "~/forkInstall";
+import {
+  forkInstallFailureMessage,
+  resolveForkSshTarget,
+  setForkInstallState,
+  useForkInstallState,
+} from "~/forkInstall";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
+import { useEnvironments } from "~/state/environments";
 import { serverEnvironment } from "~/state/server";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { FORK_MISMATCH_HINT, manualForkInstallCommand, shortForkRevision } from "~/versionSkew";
@@ -17,9 +23,9 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 
 const pendingForkUpdateEnvironmentIds = new Set<EnvironmentId>();
 
-function canInstallViaDesktopSsh(sshTarget: DesktopSshEnvironmentTarget | null): boolean {
+function canInstallViaDesktop(): boolean {
   const bridge = typeof window === "undefined" ? undefined : window.desktopBridge;
-  return sshTarget !== null && typeof bridge?.installForkAppImage === "function";
+  return typeof bridge?.installForkAppImage === "function";
 }
 
 export function ForkInstallProgress({ environmentId }: { readonly environmentId: EnvironmentId }) {
@@ -105,6 +111,14 @@ export function ForkInstallAction({
   const installState = useForkInstallState(environmentId);
   const installing = installState.status === "updating";
   const command = manualForkInstallCommand(targetRevision);
+  const { environments } = useEnvironments();
+  const resolvedSshTarget =
+    sshTarget ??
+    resolveForkSshTarget(
+      null,
+      environments.map((environment) => environment.entry),
+      serverLabel,
+    );
   const updateServer = useAtomCommand(serverEnvironment.updateServer, {
     reportFailure: false,
   });
@@ -155,8 +169,13 @@ export function ForkInstallAction({
       }
 
       const bridge = window.desktopBridge;
-      if (canInstallViaDesktopSsh(sshTarget) && sshTarget && bridge?.installForkAppImage) {
-        await bridge.installForkAppImage({ target: sshTarget, sha: targetRevision });
+      if (canInstallViaDesktop() && bridge?.installForkAppImage) {
+        await bridge.installForkAppImage({
+          sha: targetRevision,
+          environmentId,
+          label: serverLabel,
+          ...(resolvedSshTarget === null ? {} : { target: resolvedSshTarget }),
+        });
         setForkInstallState(environmentId, { status: "succeeded", sha: targetRevision });
         toastManager.add({
           type: "success",
@@ -169,7 +188,7 @@ export function ForkInstallAction({
       throw (
         lastError ??
         new Error(
-          "This server cannot update itself to a fork build. Copy the command and run it on that machine.",
+          "This server cannot update itself to a fork build. Connect it over SSH from this desktop app, or copy the command and run it on that machine.",
         )
       );
     } catch (error) {

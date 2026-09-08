@@ -1,3 +1,5 @@
+import * as NodeOS from "node:os";
+
 import type {
   DesktopSshEnvironmentBootstrap,
   DesktopSshEnvironmentTarget,
@@ -6,6 +8,7 @@ import {
   describeReadinessCause,
   waitForHttpReady as waitForHttpReadyShared,
 } from "@t3tools/shared/httpReadiness";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
 import { satisfiesSemverRange } from "@t3tools/shared/semver";
@@ -37,6 +40,8 @@ import {
   resolveSshCommand,
   resolveSshTarget,
   runSshCommand,
+  type RunSshCommandOptions,
+  type SshCommandResult,
   targetConnectionKey,
 } from "./command.ts";
 import {
@@ -77,9 +82,15 @@ interface SshTunnelEntry {
   readonly localPort: number;
   readonly httpBaseUrl: string;
   readonly wsBaseUrl: string;
+  readonly controlPath: string | null;
   readonly process: ChildProcessSpawner.ChildProcessHandle;
   readonly scope: Scope.Scope;
 }
+
+export type RunRemoteCommandOptions = Pick<
+  RunSshCommandOptions,
+  "preHostArgs" | "remoteCommandArgs" | "stdin" | "timeoutMs"
+>;
 
 type SshEnvironmentEffectContext =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -114,6 +125,41 @@ function sshTargetLogFields(target: DesktopSshEnvironmentTarget) {
     username: target.username,
     port: target.port,
   };
+}
+
+const sshControlPath = Effect.fn("ssh/tunnel.sshControlPath")(function* (
+  target: DesktopSshEnvironmentTarget,
+) {
+  const platform = yield* HostProcessPlatform;
+  if (platform === "win32") {
+    return null;
+  }
+  return `${NodeOS.tmpdir().replace(/[\\/]+$/u, "")}/t3-ssh-${remoteStateKey(target)}`;
+});
+
+function sshControlMasterArgs(mode: "master" | "slave", controlPath: string): string[] {
+  if (mode === "master") {
+    return [
+      "-o",
+      "ControlMaster=auto",
+      "-o",
+      `ControlPath=${controlPath}`,
+      "-o",
+      "ControlPersist=no",
+    ];
+  }
+  return ["-o", "ControlMaster=no", "-o", `ControlPath=${controlPath}`];
+}
+
+function isSshControlMasterFailure(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  const normalized = message.toLowerCase();
+  return (
+    /control socket/u.test(normalized) ||
+    /controlmaster/u.test(normalized) ||
+    /could not connect to (?:the )?control/u.test(normalized) ||
+    /master process has (?:exited|crashed)/u.test(normalized)
+  );
 }
 
 function sshRunnerLogFields(runner: RemoteT3RunnerOptions | undefined) {
@@ -151,6 +197,11 @@ export interface SshEnvironmentManagerShape {
   readonly disconnectEnvironment: (
     target: DesktopSshEnvironmentTarget,
   ) => Effect.Effect<void, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+  readonly runRemoteCommand: (
+    target: DesktopSshEnvironmentTarget,
+    input?: RunRemoteCommandOptions,
+  ) => Effect.Effect<SshCommandResult, SshEnvironmentEffectError, SshEnvironmentEffectContext>;
+  readonly listActiveTargets: () => Effect.Effect<readonly DesktopSshEnvironmentTarget[]>;
 }
 
 const RemoteLaunchResult = Schema.Struct({
@@ -948,6 +999,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   readonly wsBaseUrl: string;
   readonly authOptions: SshAuthOptions;
   readonly remoteServerKind: "external" | "managed" | null;
+  readonly controlPath: string | null;
 }): Effect.fn.Return<
   SshTunnelEntry,
   SshCommandError | SshInvalidTargetError | SshReadinessError,
@@ -984,12 +1036,9 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     }),
     "-o",
     "ExitOnForwardFailure=yes",
-    "-o",
-    "ControlMaster=no",
-    "-o",
-    "ControlPath=none",
-    "-o",
-    "ControlPersist=no",
+    ...(input.controlPath === null
+      ? ["-o", "ControlMaster=no", "-o", "ControlPath=none", "-o", "ControlPersist=no"]
+      : sshControlMasterArgs("master", input.controlPath)),
     "-o",
     "ServerAliveInterval=15",
     "-o",
@@ -1054,6 +1103,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
     localPort: input.localPort,
     httpBaseUrl: input.httpBaseUrl,
     wsBaseUrl: input.wsBaseUrl,
+    controlPath: input.controlPath,
     process: child,
     scope,
   };
@@ -1362,6 +1412,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       remotePort,
     });
     const entryScope = yield* Scope.make("sequential");
+    const controlPath = yield* sshControlPath(input.resolvedTarget);
     const tunnelEntry = yield* runWithSshAuth({
       key: input.key,
       target: input.resolvedTarget,
@@ -1375,6 +1426,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
           wsBaseUrl,
           authOptions,
           remoteServerKind: remoteLaunch.remoteServerKind,
+          controlPath,
         }).pipe(Effect.provideService(Scope.Scope, entryScope)),
     }).pipe(
       Effect.onExit((exit) =>
@@ -1514,6 +1566,18 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     );
   });
 
+  const resolveManagedTarget = Effect.fn("ssh/tunnel.resolveManagedTarget")(function* (
+    target: DesktopSshEnvironmentTarget,
+  ) {
+    const baseResolved = yield* resolveSshTarget(target.alias || target.hostname);
+    const resolvedTarget: DesktopSshEnvironmentTarget = {
+      ...baseResolved,
+      ...(target.username !== null ? { username: target.username } : {}),
+      ...(target.port !== null ? { port: target.port } : {}),
+    };
+    return { resolvedTarget, key: targetConnectionKey(resolvedTarget) };
+  });
+
   const ensureEnvironment = Effect.fn("ssh/tunnel.ensureEnvironment")(function* (
     target: DesktopSshEnvironmentTarget,
     requestOptions?: { readonly issuePairingToken?: boolean },
@@ -1526,13 +1590,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       ...sshTargetLogFields(target),
       issuePairingToken: requestOptions?.issuePairingToken === true,
     });
-    const baseResolved = yield* resolveSshTarget(target.alias || target.hostname);
-    const resolvedTarget: DesktopSshEnvironmentTarget = {
-      ...baseResolved,
-      ...(target.username !== null ? { username: target.username } : {}),
-      ...(target.port !== null ? { port: target.port } : {}),
-    };
-    const key = targetConnectionKey(resolvedTarget);
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
     yield* Effect.logDebug("ssh.environment.target.resolved", {
       ...sshTargetLogFields(resolvedTarget),
       key,
@@ -1582,13 +1640,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     target: DesktopSshEnvironmentTarget,
   ): Effect.fn.Return<void, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
     yield* Effect.logInfo("ssh.environment.disconnect.start", sshTargetLogFields(target));
-    const baseResolved = yield* resolveSshTarget(target.alias || target.hostname);
-    const resolvedTarget: DesktopSshEnvironmentTarget = {
-      ...baseResolved,
-      ...(target.username !== null ? { username: target.username } : {}),
-      ...(target.port !== null ? { port: target.port } : {}),
-    };
-    const key = targetConnectionKey(resolvedTarget);
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
     const entry = tunnels.get(key) ?? null;
     yield* Effect.logDebug("ssh.environment.disconnect.targetResolved", {
       ...sshTargetLogFields(resolvedTarget),
@@ -1613,7 +1665,69 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     });
   });
 
-  return SshEnvironmentManager.of({ ensureEnvironment, disconnectEnvironment });
+  const runRemoteCommand = Effect.fn("ssh/tunnel.runRemoteCommand")(function* (
+    target: DesktopSshEnvironmentTarget,
+    input: RunRemoteCommandOptions = {},
+  ): Effect.fn.Return<SshCommandResult, SshEnvironmentEffectError, SshEnvironmentEffectContext> {
+    const { resolvedTarget, key } = yield* resolveManagedTarget(target);
+    const entry = tunnels.get(key) ?? null;
+    const commandTarget = entry?.target ?? resolvedTarget;
+    const controlPath = entry?.controlPath ?? null;
+    const muxPreHostArgs =
+      controlPath === null
+        ? (input.preHostArgs ?? [])
+        : [...sshControlMasterArgs("slave", controlPath), ...(input.preHostArgs ?? [])];
+    const commandOptions = (
+      authOptions: SshAuthOptions,
+      preHostArgs: ReadonlyArray<string>,
+    ): RunSshCommandOptions => ({
+      ...authOptions,
+      ...(preHostArgs.length > 0 ? { preHostArgs } : {}),
+      ...(input.remoteCommandArgs === undefined
+        ? {}
+        : { remoteCommandArgs: input.remoteCommandArgs }),
+      ...(input.stdin === undefined ? {} : { stdin: input.stdin }),
+      ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+    });
+
+    yield* Effect.logInfo("ssh.environment.remoteCommand.start", {
+      ...sshTargetLogFields(commandTarget),
+      key,
+      hasTunnel: entry !== null,
+      hasControlPath: controlPath !== null,
+    });
+    return yield* runWithSshAuth({
+      key,
+      target: commandTarget,
+      operation: (authOptions) =>
+        runSshCommand(commandTarget, commandOptions(authOptions, muxPreHostArgs)).pipe(
+          Effect.catch((error) => {
+            if (controlPath === null || !isSshControlMasterFailure(error)) {
+              return error;
+            }
+            return Effect.logWarning("ssh.environment.remoteCommand.muxFailed", {
+              ...sshTargetLogFields(commandTarget),
+              key,
+              cause: error,
+            }).pipe(
+              Effect.andThen(
+                runSshCommand(commandTarget, commandOptions(authOptions, input.preHostArgs ?? [])),
+              ),
+            );
+          }),
+        ),
+    });
+  });
+
+  const listActiveTargets = () =>
+    Effect.sync(() => [...tunnels.values()].map((entry) => entry.target));
+
+  return SshEnvironmentManager.of({
+    ensureEnvironment,
+    disconnectEnvironment,
+    runRemoteCommand,
+    listActiveTargets,
+  });
 });
 
 /**

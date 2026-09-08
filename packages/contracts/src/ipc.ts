@@ -395,8 +395,10 @@ export const DesktopForkPushHeadResultSchema = Schema.Struct({
 export type DesktopForkPushHeadResult = typeof DesktopForkPushHeadResultSchema.Type;
 
 export const DesktopForkInstallInputSchema = Schema.Struct({
-  target: DesktopSshEnvironmentTargetSchema,
   sha: Schema.String,
+  target: Schema.optionalKey(DesktopSshEnvironmentTargetSchema),
+  environmentId: Schema.optionalKey(EnvironmentId),
+  label: Schema.optionalKey(Schema.String),
 });
 export type DesktopForkInstallInput = typeof DesktopForkInstallInputSchema.Type;
 

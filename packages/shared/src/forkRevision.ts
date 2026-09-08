@@ -5,6 +5,7 @@ export const FORK_REPO_SLUG = "dabdoue/t3code";
 export const FORK_UPDATE_SCRIPT = "scripts/fork-update-server.sh";
 export const FORK_UPDATE_SCRIPT_FALLBACK = "scripts/fork-install-linux-appimage.sh";
 export const FORK_UPDATE_SCRIPT_MARKER = "resolve_appimage";
+export const FORK_UPDATE_STABLE_SCRIPT = "/tmp/t3-fork-update-server.sh";
 export const FORK_UPDATE_SCRIPT_REFS = [
   "feat/claude-code-custom-effort-context",
   "feat/fork-remote-appimage-sync",
@@ -157,6 +158,8 @@ export function forkServerUpdateCommand(
     "  exit 1",
     "fi",
     'chmod u+x "$script"',
+    `cp "$script" ${posixSingleQuote(FORK_UPDATE_STABLE_SCRIPT)}`,
+    `chmod u+x ${posixSingleQuote(FORK_UPDATE_STABLE_SCRIPT)}`,
     `exec bash "$script" "$SHA"${restartArgs}`,
   ].join("\n");
 }

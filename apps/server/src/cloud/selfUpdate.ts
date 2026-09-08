@@ -6,7 +6,11 @@ import {
   type ServerSelfUpdateResult,
 } from "@t3tools/contracts";
 import { HostProcessExecutablePath, HostProcessPlatform } from "@t3tools/shared/hostProcess";
-import { forkServerUpdateCommand, normalizeForkRevision } from "@t3tools/shared/forkRevision";
+import {
+  FORK_UPDATE_STABLE_SCRIPT,
+  forkServerUpdateCommand,
+  normalizeForkRevision,
+} from "@t3tools/shared/forkRevision";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -118,19 +122,24 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
           );
         }
         yield* reportProgress("installing");
+        const updateOutput = `${result.stdout}\n${result.stderr}`;
+        const installKind = /(?:^|\n)kind=(appimage|server)/.exec(updateOutput)?.[1];
+        const updater =
+          /(?:^|\n)updater=(.+)\n?/.exec(updateOutput)?.[1]?.trim() ||
+          process.env.T3CODE_FORK_UPDATE_SCRIPT?.trim() ||
+          FORK_UPDATE_STABLE_SCRIPT;
         const appimage =
-          installedAppImageFromOutput(`${result.stdout}\n${result.stderr}`) ??
-          process.env.T3CODE_FORK_APPIMAGE?.trim() ??
-          process.env.APPIMAGE?.trim() ??
-          "";
-        const clone =
-          process.env.T3CODE_FORK_CLONE?.trim() || `${process.env.HOME ?? ""}/src/t3code-fork`;
-        const script = `${clone}/scripts/fork-update-server.sh`;
+          installKind === "server"
+            ? ""
+            : (installedAppImageFromOutput(updateOutput) ??
+              process.env.T3CODE_FORK_APPIMAGE?.trim() ??
+              process.env.APPIMAGE?.trim() ??
+              "");
         const restartCommand = [
           "set -euo pipefail",
           appimage.length > 0 ? `export T3CODE_FORK_APPIMAGE=${posixSingleQuote(appimage)}` : "",
           "sleep 2",
-          `exec bash ${posixSingleQuote(script)} --restart-only`,
+          `exec bash ${posixSingleQuote(updater)} --restart-only`,
         ]
           .filter((line) => line.length > 0)
           .join("\n");
@@ -146,6 +155,8 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
           .pipe(Effect.ignore);
         yield* Effect.logInfo("Fork server update prepared; restarting into the new revision.", {
           forkRevision,
+          installKind,
+          updater,
           appimage: appimage.length > 0 ? appimage : undefined,
         });
         return {

@@ -5,6 +5,7 @@ import type {
 } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import * as SshAuth from "@t3tools/ssh/auth";
+import type { SshCommandResult } from "@t3tools/ssh/command";
 import { discoverSshHosts } from "@t3tools/ssh/config";
 import {
   SshCommandError,
@@ -61,6 +62,11 @@ export class DesktopSshEnvironment extends Context.Service<
     readonly disconnectEnvironment: (
       target: DesktopSshEnvironmentTarget,
     ) => Effect.Effect<void, DesktopSshEnvironmentOperationError>;
+    readonly runRemoteCommand: (
+      target: DesktopSshEnvironmentTarget,
+      input?: SshTunnel.RunRemoteCommandOptions,
+    ) => Effect.Effect<SshCommandResult, DesktopSshEnvironmentOperationError>;
+    readonly listActiveTargets: () => Effect.Effect<readonly DesktopSshEnvironmentTarget[]>;
   }
 >()("@t3tools/desktop/ssh/DesktopSshEnvironment") {}
 
@@ -152,6 +158,16 @@ export const make = Effect.gen(function* () {
           Effect.provide(runtimeContext),
           Effect.withSpan("desktop.ssh.disconnectEnvironment"),
         ),
+    runRemoteCommand: (target, input) =>
+      manager
+        .runRemoteCommand(target, input)
+        .pipe(
+          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
+          Effect.provide(runtimeContext),
+          Effect.withSpan("desktop.ssh.runRemoteCommand"),
+        ),
+    listActiveTargets: () =>
+      manager.listActiveTargets().pipe(Effect.withSpan("desktop.ssh.listActiveTargets")),
   });
 });
 

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - The test shells out to git and bash.
 import * as NodeChildProcess from "node:child_process";
-import * as NodeFs from "node:fs";
-import * as NodeOs from "node:os";
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
@@ -57,6 +57,7 @@ describe("forkRevision", () => {
     expect(command).toContain(`show "FETCH_HEAD:scripts/fork-update-server.sh"`);
     expect(command).toContain(`show "HEAD:scripts/fork-update-server.sh"`);
     expect(command).toContain('exec bash "$script" "$SHA"');
+    expect(command).toContain("/tmp/t3-fork-update-server.sh");
     expect(command).not.toContain("checkout --force --detach");
     expect(command).not.toContain('exec bash "$SCRIPT"');
     expect(command).not.toContain("T3CODE_FORK_APPIMAGE=");
@@ -79,11 +80,11 @@ describe("forkRevision", () => {
   });
 
   it("finds the updater even when the SHA to install does not contain it", () => {
-    const root = NodeFs.mkdtempSync(NodePath.join(NodeOs.tmpdir(), "t3-fork-update-"));
+    const root = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-fork-update-"));
     const remote = NodePath.join(root, "remote.git");
     const clone = NodePath.join(root, "clone");
     const marker = NodePath.join(root, "ran");
-    NodeFs.mkdirSync(remote);
+    NodeFS.mkdirSync(remote);
     const git = (cwd: string, ...args: string[]) =>
       NodeChildProcess.execFileSync("git", args, {
         cwd,
@@ -99,12 +100,12 @@ describe("forkRevision", () => {
     git(remote, "init", "-b", "main");
     git(remote, "config", "user.email", "test@example.com");
     git(remote, "config", "user.name", "test");
-    NodeFs.writeFileSync(NodePath.join(remote, "README"), "old\n");
+    NodeFS.writeFileSync(NodePath.join(remote, "README"), "old\n");
     git(remote, "add", "README");
     git(remote, "commit", "-m", "old");
     const oldSha = git(remote, "rev-parse", "HEAD").trim();
-    NodeFs.mkdirSync(NodePath.join(remote, "scripts"));
-    NodeFs.writeFileSync(
+    NodeFS.mkdirSync(NodePath.join(remote, "scripts"));
+    NodeFS.writeFileSync(
       NodePath.join(remote, "scripts", "fork-update-server.sh"),
       [
         "#!/usr/bin/env bash",
@@ -129,6 +130,6 @@ describe("forkRevision", () => {
         HOME: root,
       },
     });
-    expect(NodeFs.readFileSync(marker, "utf8").trim()).toBe(oldSha.toLowerCase());
+    expect(NodeFS.readFileSync(marker, "utf8").trim()).toBe(oldSha.toLowerCase());
   });
 });

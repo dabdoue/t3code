@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Fetch a SHA of dabdoue/t3code and update the T3 server already running on
+# Fetch a SHA of dabdoue/t3code and update the T3 install already running on
 # this machine. Linux only. Works from any directory. Never writes
 # ~/.t3/userdata. Never pkill.
 #
-# Finds the install automatically: $T3CODE_FORK_APPIMAGE, then $APPIMAGE
-# (set when T3 itself is running this), then a T3 Code desktop entry, then a
-# running AppImage process. Optional overrides still work.
+# An AppImage is only required when this machine actually runs the desktop
+# app. Headless hosts running `t3 service` / `t3 serve` update that server
+# the same way official `t3 service update` does: clone, build the t3 CLI,
+# pin it under $T3CODE_HOME/runtime/versions, then restart t3code.service.
+# The launcher stays in place. No AppImage is installed or required.
 
 usage() {
   echo "usage: $0 <sha> [--no-restart|--restart-only]" >&2
   echo "optional env: T3CODE_FORK_APPIMAGE (absolute AppImage path, if auto-detect fails)" >&2
+  echo "              T3CODE_HOME (boot-service data dir; default: unit file or \$HOME/.t3)" >&2
   echo "              T3CODE_FORK_CLONE (default: \$HOME/src/t3code-fork)" >&2
   echo "              T3CODE_FORK_REPO_URL (default: https://github.com/dabdoue/t3code.git)" >&2
   echo "              T3CODE_FORK_DESKTOP_ENTRY (absolute .desktop path)" >&2
@@ -21,6 +24,8 @@ usage() {
 sha=""
 restart=1
 restart_only=0
+print_appimage=0
+print_install=0
 while (($#)); do
   case "$1" in
     --no-restart)
@@ -30,6 +35,14 @@ while (($#)); do
     --restart-only)
       restart_only=1
       restart=1
+      shift
+      ;;
+    --print-appimage)
+      print_appimage=1
+      shift
+      ;;
+    --print-install)
+      print_install=1
       shift
       ;;
     -h | --help)
@@ -48,7 +61,7 @@ while (($#)); do
   esac
 done
 
-if [[ "$restart_only" -eq 0 ]]; then
+if [[ "$restart_only" -eq 0 && "$print_appimage" -eq 0 && "$print_install" -eq 0 ]]; then
   [[ -n "$sha" ]] || usage
   if [[ ! "$sha" =~ ^[0-9A-Fa-f]{7,40}$ ]]; then
     echo "invalid git sha: $sha" >&2
@@ -70,6 +83,23 @@ refuse_userdata() {
       exit 1
       ;;
   esac
+}
+
+BOOT_SERVICE_UNIT="t3code.service"
+SERVICE_LAUNCHER_PROTOCOL=2
+STABLE_UPDATER="/tmp/t3-fork-update-server.sh"
+
+persist_updater() {
+  local source="${BASH_SOURCE[0]:-}"
+  if [[ -n "$source" && -f "$source" && "$source" != "$STABLE_UPDATER" ]]; then
+    cp "$source" "$STABLE_UPDATER"
+    chmod u+x "$STABLE_UPDATER" 2>/dev/null || true
+    echo "updater=$STABLE_UPDATER"
+  fi
+}
+
+boot_service_unit_file() {
+  printf '%s\n' "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/${BOOT_SERVICE_UNIT}"
 }
 
 is_t3_appimage_name() {
@@ -96,41 +126,134 @@ desktop_entry_is_t3() {
   grep -qiE '^Name=.*T3 Code' "$file" || grep -qiE '^Name=.*T3Code' "$file"
 }
 
+desktop_entry_dirs() {
+  printf '%s\n' \
+    "$HOME/.local/share/applications" \
+    "${XDG_DATA_HOME:-$HOME/.local/share}/applications" \
+    "/usr/share/applications"
+}
+
 resolve_from_desktop_entries() {
-  local candidate exec_line path
-  for candidate in "$HOME/.local/share/applications/"*.desktop; do
-    [[ -f "$candidate" ]] || continue
-    exec_line="$(grep -E '^Exec=' "$candidate" | head -n1 || true)"
-    [[ -n "$exec_line" ]] || continue
-    path="$(extract_appimage_from_exec "$exec_line" || true)"
-    [[ -n "$path" ]] || continue
-    if [[ "$path" != /* ]]; then
-      continue
-    fi
-    if desktop_entry_is_t3 "$candidate" || is_t3_appimage_name "$(basename "$path")"; then
-      printf '%s\n' "$path"
+  local dir candidate exec_line path
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for candidate in "$dir"/*.desktop; do
+      [[ -f "$candidate" ]] || continue
+      exec_line="$(grep -E '^Exec=' "$candidate" | head -n1 || true)"
+      [[ -n "$exec_line" ]] || continue
+      path="$(extract_appimage_from_exec "$exec_line" || true)"
+      [[ -n "$path" ]] || continue
+      if [[ "$path" != /* ]]; then
+        continue
+      fi
+      if desktop_entry_is_t3 "$candidate" || is_t3_appimage_name "$(basename "$path")"; then
+        printf '%s\n' "$path"
+        return 0
+      fi
+    done
+  done < <(desktop_entry_dirs)
+  return 1
+}
+
+# Same-uid processes can still EACCES /proc/PID/environ when dumpable=0.
+# Never open those files with a shell redirection: `set -e` aborts the updater.
+read_proc_strings() {
+  dd if="$1" bs=65536 count=16 2>/dev/null | tr '\0' '\n' || true
+}
+
+maybe_appimage_path() {
+  local path="$1"
+  local base resolved
+  [[ "$path" == /*.AppImage || "$path" == /*.appimage ]] || return 1
+  base="$(basename "$path")"
+  is_t3_appimage_name "$base" || return 1
+  resolved="$(readlink -f "$path" 2>/dev/null || printf '%s\n' "$path")"
+  printf '%s\n' "$resolved"
+}
+
+resolve_from_well_known_paths() {
+  local dir path newest="" newest_mtime=0 mtime
+  for dir in "$HOME/Applications" "$HOME/.local/bin" "$HOME/bin"; do
+    [[ -d "$dir" ]] || continue
+    for path in "$dir"/*.AppImage "$dir"/*.appimage; do
+      [[ -f "$path" ]] || continue
+      if maybe_appimage_path "$path" >/dev/null; then
+        mtime="$(stat -c %Y "$path" 2>/dev/null || echo 0)"
+        if [[ -z "$newest" || "$mtime" -gt "$newest_mtime" ]]; then
+          newest="$path"
+          newest_mtime="$mtime"
+        fi
+      fi
+    done
+  done
+  [[ -n "$newest" ]] || return 1
+  maybe_appimage_path "$newest"
+}
+
+scan_proc() {
+  [[ "${T3CODE_FORK_SCAN_PROC:-1}" != "0" ]]
+}
+
+resolve_from_running_appimage() {
+  local cmdfile pid arg value
+  scan_proc || return 1
+  for cmdfile in /proc/[0-9]*/cmdline; do
+    [[ -e "$cmdfile" ]] || continue
+    pid="${cmdfile#/proc/}"
+    pid="${pid%/cmdline}"
+    while IFS= read -r arg; do
+      [[ -n "$arg" ]] || continue
+      if maybe_appimage_path "$arg" >/dev/null; then
+        maybe_appimage_path "$arg"
+        return 0
+      fi
+    done < <(read_proc_strings "$cmdfile")
+    value="$(read_proc_strings "/proc/$pid/environ" | sed -n 's/^APPIMAGE=//p' | head -n1 || true)"
+    if [[ -n "$value" ]] && maybe_appimage_path "$value" >/dev/null; then
+      maybe_appimage_path "$value"
       return 0
     fi
   done
   return 1
 }
 
-resolve_from_running_processes() {
-  local envfile value base resolved
-  for envfile in /proc/[0-9]*/environ; do
-    [[ -r "$envfile" ]] || continue
-    value="$(tr '\0' '\n' <"$envfile" 2>/dev/null | sed -n 's/^APPIMAGE=//p' | head -n1 || true)"
-    [[ -n "$value" && "$value" == /* ]] || continue
-    base="$(basename "$value")"
-    if is_t3_appimage_name "$base"; then
-      resolved="$(readlink -f "$value" 2>/dev/null || printf '%s\n' "$value")"
-      printf '%s\n' "$resolved"
+is_t3_server_arg() {
+  local arg="$1"
+  case "$arg" in
+    */t3/dist/bin.mjs | */apps/server/src/bin.ts | */apps/server/dist/bin.mjs | */.bin/t3 | */bin/t3)
       return 0
-    fi
+      ;;
+    t3 | t3@*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+resolve_from_boot_service() {
+  local unit_file
+  unit_file="$(boot_service_unit_file)"
+  [[ -f "$unit_file" ]] || return 1
+  printf '%s\n' "$unit_file"
+}
+
+resolve_from_running_server() {
+  local cmdfile arg
+  scan_proc || return 1
+  for cmdfile in /proc/[0-9]*/cmdline; do
+    [[ -e "$cmdfile" ]] || continue
+    while IFS= read -r arg; do
+      [[ -n "$arg" ]] || continue
+      if is_t3_server_arg "$arg"; then
+        printf '%s\n' "$arg"
+        return 0
+      fi
+    done < <(read_proc_strings "$cmdfile")
   done
   return 1
 }
 
+# Marker name is part of the updater identity (clients grep for it).
 resolve_appimage() {
   local configured="${T3CODE_FORK_APPIMAGE:-${APPIMAGE:-}}"
   local found=""
@@ -138,11 +261,12 @@ resolve_appimage() {
     found="$configured"
   elif found="$(resolve_from_desktop_entries)"; then
     :
-  elif found="$(resolve_from_running_processes)"; then
+  elif found="$(resolve_from_well_known_paths)"; then
+    :
+  elif found="$(resolve_from_running_appimage)"; then
     :
   else
-    echo "could not find the T3 Code AppImage on this machine; set T3CODE_FORK_APPIMAGE if it lives somewhere unusual" >&2
-    exit 1
+    return 1
   fi
   if [[ "$found" != /* ]]; then
     echo "AppImage path must be absolute: $found" >&2
@@ -152,7 +276,194 @@ resolve_appimage() {
   printf '%s\n' "$found"
 }
 
-appimage="$(resolve_appimage)"
+install_kind=""
+appimage=""
+server_unit_file=""
+server_entry=""
+t3code_home=""
+fork_runtime_dir=""
+fork_runtime_version_value=""
+
+read_unit_t3code_home() {
+  local unit_file="$1"
+  local line value
+  [[ -f "$unit_file" ]] || return 1
+  while IFS= read -r line; do
+    case "$line" in
+      Environment=T3CODE_HOME=*)
+        value="${line#Environment=T3CODE_HOME=}"
+        value="${value#\"}"
+        value="${value%\"}"
+        if [[ "$value" == /* ]]; then
+          printf '%s\n' "$value"
+          return 0
+        fi
+        ;;
+    esac
+  done <"$unit_file"
+  return 1
+}
+
+resolve_t3code_home() {
+  local home=""
+  if [[ -n "${T3CODE_HOME:-}" && "${T3CODE_HOME}" == /* ]]; then
+    home="$T3CODE_HOME"
+  elif home="$(read_unit_t3code_home "${server_unit_file:-$(boot_service_unit_file)}")"; then
+    :
+  else
+    home="$HOME/.t3"
+  fi
+  refuse_userdata "$home" "T3CODE_HOME"
+  printf '%s\n' "$home"
+}
+
+fork_runtime_version() {
+  local pkg="$clone/apps/server/package.json"
+  local pkg_version short
+  [[ -f "$pkg" ]] || {
+    echo "missing $pkg" >&2
+    exit 1
+  }
+  pkg_version="$(node -p 'require(process.argv[1]).version' "$pkg")"
+  short="$(printf '%s' "${sha:-$(git -C "$clone" rev-parse HEAD)}" | tr '[:upper:]' '[:lower:]')"
+  short="${short:0:12}"
+  printf '%s\n' "${pkg_version}+fork.${short}"
+}
+
+stage_fork_runtime() {
+  local version t3_home staging dest
+  version="$(fork_runtime_version)"
+  t3_home="$(resolve_t3code_home)"
+  server_entry="$clone/apps/server/dist/bin.mjs"
+  [[ -f "$server_entry" && -f "$clone/apps/server/dist/service-launcher.mjs" ]] || {
+    echo "server build did not produce dist/bin.mjs and dist/service-launcher.mjs" >&2
+    exit 1
+  }
+  mkdir -p "$t3_home/runtime/versions"
+  staging="$(mktemp -d "$t3_home/runtime/versions/.staging-fork-XXXXXX")"
+  mkdir -p "$staging/node_modules/t3"
+  cp -a "$clone/apps/server/dist" "$staging/node_modules/t3/dist"
+  node -e '
+    const fs = require("node:fs");
+    const src = process.argv[1];
+    const dest = process.argv[2];
+    const version = process.argv[3];
+    const pkg = JSON.parse(fs.readFileSync(src, "utf8"));
+    fs.writeFileSync(
+      dest,
+      `${JSON.stringify(
+        {
+          name: pkg.name,
+          version,
+          type: pkg.type || "module",
+          bin: pkg.bin,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  ' "$clone/apps/server/package.json" "$staging/node_modules/t3/package.json" "$version"
+  printf '%s\n' "$version" >"$staging/.install-complete"
+  dest="$t3_home/runtime/versions/$version"
+  rm -rf "$dest"
+  mv "$staging" "$dest"
+  fork_runtime_dir="$dest"
+  fork_runtime_version_value="$version"
+  t3code_home="$t3_home"
+  echo "kind=server"
+  echo "version=$version"
+  echo "runtime=$dest"
+  echo "entry=$dest/node_modules/t3/dist/bin.mjs"
+}
+
+commit_boot_service() {
+  local t3_home version launcher_src launcher_dest state_path unit_file dropin
+  t3_home="${t3code_home:-$(resolve_t3code_home)}"
+  version="${fork_runtime_version_value:-$(fork_runtime_version)}"
+  fork_runtime_dir="${fork_runtime_dir:-$t3_home/runtime/versions/$version}"
+  launcher_src="$fork_runtime_dir/node_modules/t3/dist/service-launcher.mjs"
+  launcher_dest="$t3_home/runtime/service-launcher.mjs"
+  state_path="$t3_home/runtime/service-state.json"
+  unit_file="${server_unit_file:-$(boot_service_unit_file)}"
+  [[ -f "$launcher_src" ]] || {
+    echo "missing $launcher_src; run the updater without --restart-only first" >&2
+    exit 1
+  }
+  [[ -f "$unit_file" ]] || return 1
+
+  dropin="$unit_file.d/fork.conf"
+  if [[ -f "$dropin" ]]; then
+    rm -f "$dropin"
+    echo "removed-dropin=$dropin"
+  fi
+
+  echo "stopping=$BOOT_SERVICE_UNIT"
+  systemctl --user stop "$BOOT_SERVICE_UNIT" || true
+  mkdir -p "$(dirname "$launcher_dest")"
+  cp -a "$launcher_src" "$launcher_dest"
+  cat >"$state_path" <<EOF
+{
+  "protocol": $SERVICE_LAUNCHER_PROTOCOL,
+  "activeVersion": "$version"
+}
+EOF
+  echo "state=$state_path"
+  echo "launcher=$launcher_dest"
+  echo "restarting=$BOOT_SERVICE_UNIT"
+  systemctl --user daemon-reload
+  systemctl --user restart "$BOOT_SERVICE_UNIT"
+}
+
+detect_install() {
+  local found=""
+  if found="$(resolve_appimage)"; then
+    install_kind="appimage"
+    appimage="$found"
+    return
+  fi
+  if found="$(resolve_from_boot_service)"; then
+    install_kind="server"
+    server_unit_file="$found"
+    return
+  fi
+  if found="$(resolve_from_running_server)"; then
+    install_kind="server"
+    return
+  fi
+  install_kind="none"
+}
+
+detect_install
+
+if [[ "$print_install" -eq 1 ]]; then
+  printf 'kind=%s\n' "$install_kind"
+  if [[ "$install_kind" == "appimage" ]]; then
+    printf 'path=%s\n' "$appimage"
+  elif [[ "$install_kind" == "server" ]]; then
+    printf 'unit=%s\n' "$BOOT_SERVICE_UNIT"
+    if [[ -n "$server_unit_file" ]]; then
+      printf 'unit-file=%s\n' "$server_unit_file"
+    fi
+  fi
+  exit 0
+fi
+
+if [[ "$print_appimage" -eq 1 ]]; then
+  if [[ "$install_kind" != "appimage" ]]; then
+    echo "no T3 Code AppImage on this machine; a t3 server does not need one" >&2
+    exit 1
+  fi
+  printf '%s\n' "$appimage"
+  exit 0
+fi
+
+if [[ "$install_kind" == "none" ]]; then
+  echo "could not find a T3 Code AppImage or T3 server on this machine" >&2
+  echo "desktop hosts need the AppImage (or T3CODE_FORK_APPIMAGE); server hosts need t3code.service or a running t3 process" >&2
+  exit 1
+fi
+
+persist_updater
 
 clone="${T3CODE_FORK_CLONE:-$HOME/src/t3code-fork}"
 if [[ "$clone" != /* ]]; then
@@ -165,41 +476,53 @@ repo_url="${T3CODE_FORK_REPO_URL:-https://github.com/dabdoue/t3code.git}"
 desktop_entry="${T3CODE_FORK_DESKTOP_ENTRY:-}"
 
 if [[ "$restart_only" -eq 0 ]]; then
-  if ! command -v git >/dev/null 2>&1; then
-    echo "git is required" >&2
-    exit 1
-  fi
   if ! command -v node >/dev/null 2>&1; then
     echo "Node.js is required on this machine" >&2
     exit 1
   fi
 
-  mkdir -p "$(dirname "$clone")"
-  if [[ ! -d "$clone/.git" ]]; then
-    git clone "$repo_url" "$clone"
+  if [[ "${T3CODE_FORK_SKIP_FETCH:-}" != "1" ]]; then
+    if ! command -v git >/dev/null 2>&1; then
+      echo "git is required" >&2
+      exit 1
+    fi
+
+    mkdir -p "$(dirname "$clone")"
+    if [[ ! -d "$clone/.git" ]]; then
+      git clone "$repo_url" "$clone"
+    fi
+
+    git -C "$clone" fetch --force "$repo_url" "$sha"
+    git -C "$clone" checkout --force --detach FETCH_HEAD
+    git -C "$clone" rev-parse --verify --quiet HEAD >/dev/null
+  elif [[ ! -d "$clone" ]]; then
+    echo "T3CODE_FORK_SKIP_FETCH requires an existing clone at $clone" >&2
+    exit 1
   fi
 
-  git -C "$clone" fetch --force "$repo_url" "$sha"
-  git -C "$clone" checkout --force --detach FETCH_HEAD
-  git -C "$clone" rev-parse --verify --quiet HEAD >/dev/null
-
   # GitHub clones have no `.env`. Copy the public T3 Connect identifiers from
-  # `.env.example` so remote AppImages keep Clerk/relay, matching official builds.
+  # `.env.example` so remote builds keep Clerk/relay, matching official builds.
   if [[ ! -f "$clone/.env" && -f "$clone/.env.example" ]]; then
     cp "$clone/.env.example" "$clone/.env"
   fi
 
-  if [[ ! -f "$clone/scripts/build-desktop-artifact.ts" ]]; then
+  if [[ "$install_kind" == "appimage" && ! -f "$clone/scripts/build-desktop-artifact.ts" ]]; then
+    echo "not a T3 Code checkout: $clone" >&2
+    exit 1
+  fi
+  if [[ "$install_kind" == "server" && ! -f "$clone/apps/server/package.json" ]]; then
     echo "not a T3 Code checkout: $clone" >&2
     exit 1
   fi
 
-  if [[ ! -x "$clone/node_modules/.bin/vp" ]]; then
-    if command -v vp >/dev/null 2>&1; then
-      (cd "$clone" && vp i)
-    else
-      echo "missing Vite+ (vp); install it, then run: (cd $clone && vp i)" >&2
-      exit 1
+  if [[ "${T3CODE_FORK_SKIP_FETCH:-}" != "1" ]]; then
+    if [[ ! -x "$clone/node_modules/.bin/vp" ]]; then
+      if command -v vp >/dev/null 2>&1; then
+        (cd "$clone" && vp i)
+      else
+        echo "missing Vite+ (vp); install it, then run: (cd $clone && vp i)" >&2
+        exit 1
+      fi
     fi
   fi
 
@@ -210,7 +533,7 @@ if [[ "$restart_only" -eq 0 ]]; then
   trap cleanup EXIT
 
   build_path="$clone/node_modules/.bin:$PATH"
-  if ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
+  if [[ "$install_kind" == "appimage" ]] && ! command -v magick >/dev/null 2>&1 && ! command -v convert >/dev/null 2>&1; then
     command -v ffmpeg >/dev/null 2>&1 || {
       echo "ImageMagick is unavailable and ffmpeg fallback was not found" >&2
       exit 1
@@ -231,36 +554,49 @@ EOF
     build_path="$helper_dir:$build_path"
   fi
 
-  (
-    cd "$clone"
-    PATH="$build_path" T3CODE_FORK_REVISION="$(git rev-parse HEAD)" \
-      node scripts/build-desktop-artifact.ts \
-      --platform linux --target AppImage --arch x64
-  )
+  if [[ "$install_kind" == "appimage" ]]; then
+    (
+      cd "$clone"
+      PATH="$build_path" T3CODE_FORK_REVISION="$(git rev-parse HEAD)" \
+        node scripts/build-desktop-artifact.ts \
+        --platform linux --target AppImage --arch x64
+    )
 
-  artifact="$(find "$clone/release" -maxdepth 1 -type f -name 'T3-Code-*-x86_64.AppImage' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
-  [[ -n "$artifact" && -x "$artifact" ]] || {
-    echo "build did not produce an executable AppImage" >&2
-    exit 1
-  }
-  file "$artifact"
-  sha256sum "$artifact"
+    artifact="$(find "$clone/release" -maxdepth 1 -type f -name 'T3-Code-*-x86_64.AppImage' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d' ' -f2-)"
+    [[ -n "$artifact" && -x "$artifact" ]] || {
+      echo "build did not produce an executable AppImage" >&2
+      exit 1
+    }
+    file "$artifact"
+    sha256sum "$artifact"
 
-  installed_dir="$(dirname "$appimage")"
-  installed_name="$(basename "$appimage")"
-  mkdir -p "$installed_dir"
-  if [[ -e "$appimage" ]]; then
-    backup="/tmp/${installed_name}.previous.$(date +%Y%m%d-%H%M%S)"
-    cp -p "$appimage" "$backup"
-    echo "backup=$backup"
+    installed_dir="$(dirname "$appimage")"
+    installed_name="$(basename "$appimage")"
+    mkdir -p "$installed_dir"
+    if [[ -e "$appimage" ]]; then
+      backup="/tmp/${installed_name}.previous.$(date +%Y%m%d-%H%M%S)"
+      cp -p "$appimage" "$backup"
+      echo "backup=$backup"
+    fi
+    staged="$appimage.new"
+    install -m 755 "$artifact" "$staged"
+    mv -f "$staged" "$appimage"
+    cmp -s "$artifact" "$appimage"
+    echo "kind=appimage"
+    echo "installed=$appimage"
+    sha256sum "$appimage"
+    echo "artifact=$artifact"
+  else
+    if [[ "${T3CODE_FORK_SKIP_FETCH:-}" != "1" ]]; then
+      (
+        cd "$clone/apps/server"
+        PATH="$build_path" T3CODE_FORK_REVISION="$(git -C "$clone" rev-parse HEAD 2>/dev/null || printf '%s\n' "$sha")" \
+          node --run build:bundle
+      )
+    fi
+    stage_fork_runtime
+    sha256sum "$clone/apps/server/dist/bin.mjs"
   fi
-  staged="$appimage.new"
-  install -m 755 "$artifact" "$staged"
-  mv -f "$staged" "$appimage"
-  cmp -s "$artifact" "$appimage"
-  echo "installed=$appimage"
-  sha256sum "$appimage"
-  echo "artifact=$artifact"
 fi
 
 resolve_desktop_entry() {
@@ -268,42 +604,75 @@ resolve_desktop_entry() {
     printf '%s\n' "$desktop_entry"
     return
   fi
-  local candidate
-  for candidate in "$HOME/.local/share/applications/"*.desktop; do
-    [[ -f "$candidate" ]] || continue
-    if grep -Fq -- "$appimage" "$candidate"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
-  for candidate in "$HOME/.local/share/applications/"*.desktop; do
-    [[ -f "$candidate" ]] || continue
-    if desktop_entry_is_t3 "$candidate"; then
-      printf '%s\n' "$candidate"
-      return
-    fi
-  done
+  local dir candidate
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for candidate in "$dir"/*.desktop; do
+      [[ -f "$candidate" ]] || continue
+      if grep -Fq -- "$appimage" "$candidate"; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  done < <(desktop_entry_dirs)
+  while IFS= read -r dir; do
+    [[ -d "$dir" ]] || continue
+    for candidate in "$dir"/*.desktop; do
+      [[ -f "$candidate" ]] || continue
+      if desktop_entry_is_t3 "$candidate"; then
+        printf '%s\n' "$candidate"
+        return
+      fi
+    done
+  done < <(desktop_entry_dirs)
+}
+
+ensure_desktop_entry() {
+  local existing dest
+  existing="$(resolve_desktop_entry || true)"
+  if [[ -n "$existing" && -f "$existing" ]]; then
+    printf '%s\n' "$existing"
+    return
+  fi
+  dest="$HOME/.local/share/applications/t3-code-fork.desktop"
+  mkdir -p "$(dirname "$dest")"
+  cat >"$dest" <<EOF
+[Desktop Entry]
+Type=Application
+Name=T3 Code
+Exec=$appimage
+Terminal=false
+StartupWMClass=t3code
+EOF
+  printf '%s\n' "$dest"
 }
 
 scope_runs_appimage() {
   local pid="$1"
-  local envfile="/proc/$pid/environ"
   local value arg resolved
   resolved="$(readlink -f "$appimage" 2>/dev/null || printf '%s\n' "$appimage")"
-  if [[ -r "$envfile" ]]; then
-    value="$(tr '\0' '\n' <"$envfile" | sed -n 's/^APPIMAGE=//p' | head -n1 || true)"
-    if [[ -n "$value" && "$(readlink -f "$value" 2>/dev/null || echo "$value")" == "$resolved" ]]; then
+  value="$(read_proc_strings "/proc/$pid/environ" | sed -n 's/^APPIMAGE=//p' | head -n1 || true)"
+  if [[ -n "$value" && "$(readlink -f "$value" 2>/dev/null || echo "$value")" == "$resolved" ]]; then
+    return 0
+  fi
+  while IFS= read -r arg; do
+    [[ -n "$arg" ]] || continue
+    if [[ "$(readlink -f "$arg" 2>/dev/null || true)" == "$resolved" ]]; then
       return 0
     fi
-  fi
-  if [[ -r "/proc/$pid/cmdline" ]]; then
-    while IFS= read -r arg; do
-      [[ -n "$arg" ]] || continue
-      if [[ "$(readlink -f "$arg" 2>/dev/null || true)" == "$resolved" ]]; then
-        return 0
-      fi
-    done < <(tr '\0' '\n' <"/proc/$pid/cmdline")
-  fi
+  done < <(read_proc_strings "/proc/$pid/cmdline")
+  return 1
+}
+
+scope_runs_server() {
+  local pid="$1"
+  local arg
+  while IFS= read -r arg; do
+    [[ -n "$arg" ]] || continue
+    if is_t3_server_arg "$arg"; then
+      return 0
+    fi
+  done < <(read_proc_strings "/proc/$pid/cmdline")
   return 1
 }
 
@@ -318,30 +687,57 @@ load_graphical_environment() {
   done < <(systemctl --user show-environment 2>/dev/null || true)
 }
 
+stop_matching_scopes() {
+  local matcher="$1"
+  local unit pid
+  matching_scopes=()
+  while read -r unit _; do
+    [[ "$unit" == *.scope ]] || continue
+    pid="$(systemctl --user show -p MainPID --value "$unit" 2>/dev/null || true)"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    if "$matcher" "$pid"; then
+      matching_scopes+=("$unit")
+    fi
+  done < <(systemctl --user list-units --type=scope --state=running --no-legend --plain)
+
+  for unit in "${matching_scopes[@]}"; do
+    echo "stopping=$unit"
+    systemctl --user stop "$unit"
+  done
+}
+
 if [[ "$restart" -eq 0 ]]; then
   exit 0
 fi
 
-appimage="$(readlink -f "$appimage")"
-matching_scopes=()
-unit=""
-pid=""
-while read -r unit _; do
-  [[ "$unit" == *.scope ]] || continue
-  pid="$(systemctl --user show -p MainPID --value "$unit" 2>/dev/null || true)"
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
-  if scope_runs_appimage "$pid"; then
-    matching_scopes+=("$unit")
+if [[ "$install_kind" == "server" ]]; then
+  if commit_boot_service; then
+    exit 0
   fi
-done < <(systemctl --user list-units --type=scope --state=running --no-legend --plain)
+  server_entry="$clone/apps/server/dist/bin.mjs"
+  [[ -f "$server_entry" ]] || {
+    echo "missing $server_entry; run the updater without --restart-only first" >&2
+    exit 1
+  }
+  stop_matching_scopes scope_runs_server
+  node_path="$(command -v node)"
+  node_path="$(readlink -f "$node_path")"
+  resolved_sha="${sha:-$(git -C "$clone" rev-parse HEAD 2>/dev/null || true)}"
+  echo "starting=t3-fork-server.service"
+  systemctl --user stop t3-fork-server.service 2>/dev/null || true
+  systemctl --user reset-failed t3-fork-server.service 2>/dev/null || true
+  systemd-run --user --unit=t3-fork-server.service \
+    --property=Restart=always --property=RestartSec=5 \
+    --setenv="T3CODE_FORK_REVISION=$resolved_sha" \
+    "$node_path" "$server_entry" serve
+  exit 0
+fi
 
-for unit in "${matching_scopes[@]}"; do
-  echo "stopping=$unit"
-  systemctl --user stop "$unit"
-done
+appimage="$(readlink -f "$appimage")"
+stop_matching_scopes scope_runs_appimage
 
 load_graphical_environment
-entry="$(resolve_desktop_entry || true)"
+entry="$(ensure_desktop_entry)"
 if [[ -z "$entry" || ! -f "$entry" ]]; then
   echo "updated the server but could not find a desktop entry that launches it; start it from your existing launcher" >&2
   exit 1

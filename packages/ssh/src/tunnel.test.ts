@@ -1,5 +1,6 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -81,6 +82,23 @@ const makeRunningProcess = (onKill: () => void) => {
   });
 };
 
+const makeFailedProcess = (stderr: string, exitCode = 255) => {
+  const stderrStream = Stream.make(new TextEncoder().encode(stderr));
+  return ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(123),
+    stdout: Stream.empty,
+    stderr: stderrStream,
+    all: stderrStream,
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    stdin: Sink.drain,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+    unref: Effect.succeed(Effect.void),
+  });
+};
+
 const testHttpClient = HttpClient.make((request) =>
   Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
 );
@@ -97,6 +115,10 @@ const testNetService = NetService.NetService.of({
 
 function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
   return command._tag === "StandardCommand" ? command.args : [];
+}
+
+function commandEnv(command: ChildProcess.Command): Record<string, string | undefined> | undefined {
+  return command._tag === "StandardCommand" ? command.options.env : undefined;
 }
 
 describe("ssh tunnel scripts", () => {
@@ -432,9 +454,31 @@ describe("ssh tunnel scripts", () => {
       assert.equal(first.httpBaseUrl, "http://127.0.0.1:41773/");
       const firstTunnelArgs = spawnedCommands.find((args) => args.includes("-N"));
       assert.isDefined(firstTunnelArgs);
-      assert.include(firstTunnelArgs, "ControlMaster=no");
-      assert.include(firstTunnelArgs, "ControlPath=none");
-      assert.include(firstTunnelArgs, "ControlPersist=no");
+      const platform = yield* HostProcessPlatform;
+      if (platform === "win32") {
+        assert.include(firstTunnelArgs, "ControlMaster=no");
+        assert.include(firstTunnelArgs, "ControlPath=none");
+        assert.include(firstTunnelArgs, "ControlPersist=no");
+      } else {
+        assert.include(firstTunnelArgs, "ControlMaster=auto");
+        const controlPathOption = firstTunnelArgs.find((arg) => arg.startsWith("ControlPath="));
+        assert.isDefined(controlPathOption);
+        assert.match(controlPathOption, /ControlPath=.*t3-ssh-/u);
+        assert.include(firstTunnelArgs, "ControlPersist=no");
+      }
+
+      yield* manager.runRemoteCommand(target, { remoteCommandArgs: ["true"] });
+      const remoteCommandArgs = spawnedCommands.find((args) => args.includes("true"));
+      assert.isDefined(remoteCommandArgs);
+      if (platform !== "win32") {
+        const slaveControlPath = remoteCommandArgs.find((arg) => arg.startsWith("ControlPath="));
+        assert.isDefined(slaveControlPath);
+        assert.match(slaveControlPath, /ControlPath=.*t3-ssh-/u);
+        assert.include(remoteCommandArgs, "ControlMaster=no");
+      }
+      const activeTargets = yield* manager.listActiveTargets();
+      assert.equal(activeTargets.length, 1);
+      assert.equal(activeTargets[0]?.alias, "devbox");
 
       yield* manager.disconnectEnvironment(target);
       assert.equal(tunnelKillCount, 1);
@@ -444,6 +488,65 @@ describe("ssh tunnel scripts", () => {
 
       assert.equal(spawnedCommands.filter((args) => args.includes("-N")).length, 2);
       assert.equal(tunnelKillCount, 1);
+    }).pipe(Effect.provide(layer), Effect.scoped);
+  });
+
+  it.effect("reuses a prompted SSH password for later remote commands", () => {
+    let promptCount = 0;
+    const remoteSecrets: Array<string | undefined> = [];
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.sync(() => {
+        const args = commandArgs(command);
+        if (args.includes("-G")) {
+          return makeSuccessfulProcess("hostname 132.239.222.55\nuser dabdoue\nport 22\n");
+        }
+        const secret = commandEnv(command)?.T3_SSH_AUTH_SECRET;
+        remoteSecrets.push(secret);
+        if (secret === "lab-password") {
+          return makeSuccessfulProcess("updated\n");
+        }
+        return makeFailedProcess(
+          "dabdoue@132.239.222.55: Permission denied (publickey,password).\n",
+        );
+      }),
+    );
+    const layer = Layer.mergeAll(
+      NodeServices.layer,
+      Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+      Layer.succeed(HttpClient.HttpClient, testHttpClient),
+      Layer.succeed(NetService.NetService, testNetService),
+      Layer.succeed(
+        SshPasswordPrompt,
+        SshPasswordPrompt.of({
+          isAvailable: true,
+          request: () => {
+            promptCount += 1;
+            return Effect.succeed("lab-password");
+          },
+        }),
+      ),
+      SshEnvironmentManager.layer(),
+    );
+    const target = {
+      alias: "132.239.222.55",
+      hostname: "132.239.222.55",
+      username: "dabdoue",
+      port: null,
+    } as const;
+
+    return Effect.gen(function* () {
+      const manager = yield* SshEnvironmentManager;
+      const first = yield* manager.runRemoteCommand(target, {
+        remoteCommandArgs: ["true"],
+      });
+      assert.equal(first.stdout.trim(), "updated");
+      const second = yield* manager.runRemoteCommand(target, {
+        remoteCommandArgs: ["true"],
+      });
+      assert.equal(second.stdout.trim(), "updated");
+      assert.equal(promptCount, 1);
+      assert.include(remoteSecrets, undefined);
+      assert.isAtLeast(remoteSecrets.filter((secret) => secret === "lab-password").length, 2);
     }).pipe(Effect.provide(layer), Effect.scoped);
   });
 });

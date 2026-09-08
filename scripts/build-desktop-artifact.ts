@@ -1044,6 +1044,10 @@ export const DESKTOP_EXTRA_RESOURCES = [
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
   },
+  {
+    from: "scripts/fork-update-server.sh",
+    to: "fork-update-server.sh",
+  },
 ] as const;
 
 export interface MacPasskeySigningConfiguration {
