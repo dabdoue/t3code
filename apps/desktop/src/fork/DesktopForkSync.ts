@@ -15,7 +15,11 @@ import type {
   DesktopForkPushHeadResult,
   DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
-import { forkServerUpdateCommand, normalizeForkRevision } from "@t3tools/shared/forkRevision";
+import {
+  forkServerUpdateCommand,
+  isForkUpdateScriptSource,
+  normalizeForkRevision,
+} from "@t3tools/shared/forkRevision";
 import {
   collectProcessOutput,
   getLastNonEmptyOutputLine,
@@ -68,6 +72,34 @@ export function buildRemoteForkInstallCommand(sha: string): string {
   }
   return command;
 }
+
+function localForkUpdateScriptCandidates(env: NodeJS.ProcessEnv): string[] {
+  const configuredScript = env.T3CODE_FORK_UPDATE_SCRIPT?.trim() ?? "";
+  const checkout = env.T3CODE_FORK_CHECKOUT?.trim() ?? "";
+  return [
+    configuredScript,
+    checkout.length > 0 ? NodePath.join(checkout, "scripts", "fork-update-server.sh") : "",
+  ].filter((candidate) => candidate.length > 0);
+}
+
+export const readLocalForkUpdateScript = Effect.fn("desktop.forkSync.readLocalUpdater")(function* (
+  env: NodeJS.ProcessEnv = process.env,
+) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  for (const candidate of localForkUpdateScriptCandidates(env)) {
+    const absolute = NodePath.isAbsolute(candidate) ? candidate : NodePath.resolve(candidate);
+    if (!(yield* fileSystem.exists(absolute).pipe(Effect.orElseSucceed(() => false)))) {
+      continue;
+    }
+    const contents = yield* fileSystem
+      .readFileString(absolute)
+      .pipe(Effect.orElseSucceed(() => ""));
+    if (isForkUpdateScriptSource(contents)) {
+      return contents;
+    }
+  }
+  return null;
+});
 
 function tailOutput(output: string): string {
   if (output.length <= LOG_TAIL_CHARS) {
@@ -166,8 +198,11 @@ export const installForkAppImage = Effect.fn("desktop.forkSync.install")(functio
   if (sha === null) {
     return yield* new DesktopForkSyncError({ reason: `Invalid git SHA: ${input.sha}` });
   }
+  const localScript = yield* readLocalForkUpdateScript();
   const result = yield* runSshCommand(input.target, {
-    remoteCommandArgs: ["bash", "-lc", buildRemoteForkInstallCommand(sha)],
+    ...(localScript === null
+      ? { remoteCommandArgs: ["bash", "-lc", buildRemoteForkInstallCommand(sha)] }
+      : { remoteCommandArgs: ["bash", "-s", "--", sha], stdin: localScript }),
     timeoutMs: REMOTE_INSTALL_TIMEOUT_MS,
     preHostArgs: ["-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=120"],
   }).pipe(

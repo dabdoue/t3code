@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveForkRevision } from "./resolve-fork-revision.ts";
+import { resolveForkRevision } from "../../../../scripts/lib/resolve-fork-revision.ts";
 
 describe("resolveForkRevision", () => {
   it("uses T3CODE_FORK_REVISION when git is unavailable", () => {

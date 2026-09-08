@@ -2440,7 +2440,6 @@ function ChatViewContent(props: ChatViewProps) {
                   sshTarget={forkSshTarget}
                   targetRevision={forkMismatch.clientRevision}
                   forkServerUpdate={versionMismatchForkServerUpdate}
-                  selfUpdate={versionMismatchSelfUpdate}
                   label={
                     forkInstallState.status === "failed"
                       ? "Retry"
@@ -2517,7 +2516,6 @@ function ChatViewContent(props: ChatViewProps) {
               sshTarget={forkSshTarget}
               targetRevision={forkMismatch.clientRevision}
               forkServerUpdate={versionMismatchForkServerUpdate}
-              selfUpdate={versionMismatchSelfUpdate}
               label={forkInstallState.status === "failed" ? "Retry" : "Update"}
               variant="ghost"
             />

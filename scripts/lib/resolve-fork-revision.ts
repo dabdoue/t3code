@@ -14,18 +14,18 @@ export function resolveForkRevision({
   readonly env?: NodeJS.ProcessEnv;
   readonly repoRoot?: string;
 } = {}): string | undefined {
-  const fromEnv = env.T3CODE_FORK_REVISION?.trim();
-  if (fromEnv) {
-    return fromEnv;
-  }
   try {
     const sha = NodeChildProcess.execFileSync("git", ["rev-parse", "HEAD"], {
       cwd: repoRoot,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
-    return sha.length > 0 ? sha : undefined;
+    if (sha.length > 0) {
+      return sha;
+    }
   } catch {
-    return undefined;
+    // Not a git checkout (packaged build, extracted tarball). Fall through.
   }
+  const fromEnv = env.T3CODE_FORK_REVISION?.trim();
+  return fromEnv && fromEnv.length > 0 ? fromEnv : undefined;
 }

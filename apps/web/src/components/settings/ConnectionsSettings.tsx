@@ -1529,7 +1529,6 @@ function SavedBackendListRow({
               sshTarget={forkSshTarget}
               targetRevision={forkMismatch.clientRevision}
               forkServerUpdate={supportsForkServerUpdate(environment.serverConfig)}
-              selfUpdate={resolveServerSelfUpdateCapability(environment.serverConfig)}
             />
           ) : null}
           {isWslEnvironment ? (

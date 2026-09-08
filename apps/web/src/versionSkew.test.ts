@@ -313,5 +313,7 @@ describe("versionSkew", () => {
     expect(command).toContain(sha);
     expect(command).not.toContain("T3CODE_FORK_APPIMAGE=");
     expect(command).not.toContain("./scripts/");
+    expect(command).toContain("raw.githubusercontent.com/dabdoue/t3code");
+    expect(command).not.toContain("checkout --force --detach");
   });
 });

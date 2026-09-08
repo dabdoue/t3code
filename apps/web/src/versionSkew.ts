@@ -221,7 +221,11 @@ export function buildForkMismatchDismissalKey(
 }
 
 export function manualForkInstallCommand(sha: string): string {
-  return manualForkServerUpdateCommand(sha) ?? `bash -lc 'echo invalid fork revision; exit 1'`;
+  return (
+    manualForkServerUpdateCommand(sha, {
+      ...(APP_FORK_REVISION ? { scriptRevision: APP_FORK_REVISION } : {}),
+    }) ?? `bash -lc 'echo invalid fork revision; exit 1'`
+  );
 }
 
 export function forkInstallGuidance(): string {

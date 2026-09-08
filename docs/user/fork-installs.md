@@ -27,9 +27,10 @@ server machine. It works from any directory and finds the existing T3 install it
 bash -lc '…'
 ```
 
-The copied command clones this SHA from GitHub into `$HOME/src/t3code-fork` (override with
-`T3CODE_FORK_CLONE` if you want), then updates the T3 server already on that machine. It looks for
-the running AppImage (`$APPIMAGE`), a T3 Code desktop entry, or a running T3 process. Set
+The copied command fetches this SHA from GitHub and downloads the updater separately — the commit
+you are installing does not need to contain that script. It clones into `$HOME/src/t3code-fork`
+(override with `T3CODE_FORK_CLONE`) and then updates the T3 server already on that machine. It looks
+for the running AppImage (`$APPIMAGE`), a T3 Code desktop entry, or a running T3 process. Set
 `T3CODE_FORK_APPIMAGE` only if it lives somewhere those checks miss.
 
 The command never writes live T3 state under `~/.t3/userdata`.

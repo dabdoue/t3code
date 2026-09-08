@@ -1,8 +1,4 @@
-import type {
-  DesktopSshEnvironmentTarget,
-  EnvironmentId,
-  ServerSelfUpdateCapability,
-} from "@t3tools/contracts";
+import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -95,7 +91,6 @@ export function ForkInstallAction({
   sshTarget,
   targetRevision,
   forkServerUpdate,
-  selfUpdate,
   label = "Update",
   variant = "outline",
 }: {
@@ -104,7 +99,6 @@ export function ForkInstallAction({
   readonly sshTarget: DesktopSshEnvironmentTarget | null;
   readonly targetRevision: string;
   readonly forkServerUpdate: boolean;
-  readonly selfUpdate: ServerSelfUpdateCapability | null;
   readonly label?: string;
   readonly variant?: ComponentProps<typeof Button>["variant"];
 }) {
@@ -114,7 +108,9 @@ export function ForkInstallAction({
   const updateServer = useAtomCommand(serverEnvironment.updateServer, {
     reportFailure: false,
   });
-  const canUseRpc = forkServerUpdate || (selfUpdate !== null && selfUpdate !== "desktop-managed");
+  // Only servers that advertise forkServerUpdate intercept a git SHA.
+  // Older boot-service remotes reject it as "not an exact t3 version".
+  const canUseRpc = forkServerUpdate;
 
   const handleUpdate = async () => {
     if (installing || pendingForkUpdateEnvironmentIds.has(environmentId)) {
