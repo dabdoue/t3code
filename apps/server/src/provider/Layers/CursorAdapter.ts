@@ -17,6 +17,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   RuntimeRequestId,
+  RuntimeTaskId,
   type RuntimeMode,
   type ThreadId,
   TurnId,
@@ -71,7 +72,12 @@ import { CursorTransportFailure } from "../acp/CursorTransportFailure.ts";
 import {
   CursorAskQuestionRequest,
   CursorCreatePlanRequest,
+  CursorTaskRequest,
   CursorUpdateTodosRequest,
+  cursorTaskDurationMs,
+  cursorTaskId,
+  cursorTaskRole,
+  cursorTaskTitle,
   extractAskQuestions,
   extractPlanMarkdown,
   extractTodosAsPlan,
@@ -683,6 +689,80 @@ export function makeCursorAdapter(
                     }
                   }),
                 ),
+            );
+            const emitCursorTaskEvents = (params: typeof CursorTaskRequest.Type) =>
+              mapExtensionFailure(
+                Effect.gen(function* () {
+                  yield* logNative(input.threadId, "cursor/task", params, "acp.cursor.extension");
+                  const taskIdValue = cursorTaskId(params);
+                  if (!taskIdValue) return;
+
+                  const taskId = RuntimeTaskId.make(taskIdValue);
+                  const title = cursorTaskTitle(params);
+                  const role = cursorTaskRole(params.subagentType);
+                  const model = params.model?.trim() || undefined;
+                  const toolUseId = params.toolCallId.trim() || undefined;
+                  const durationMs = cursorTaskDurationMs(params);
+                  const linkage = {
+                    title,
+                    ...(role ? { role } : {}),
+                    ...(model ? { model } : {}),
+                    ...(toolUseId ? { toolUseId } : {}),
+                    timelineBypass: true as const,
+                  };
+
+                  yield* offerRuntimeEvent({
+                    type: "task.started",
+                    ...(yield* makeEventStamp()),
+                    provider: PROVIDER,
+                    threadId: input.threadId,
+                    turnId: ctx?.activeTurnId,
+                    payload: { taskId, description: title, ...linkage },
+                    raw: {
+                      source: "acp.cursor.extension",
+                      method: "cursor/task",
+                      payload: params,
+                    },
+                  });
+
+                  if (durationMs !== undefined) {
+                    yield* offerRuntimeEvent({
+                      type: "task.completed",
+                      ...(yield* makeEventStamp()),
+                      provider: PROVIDER,
+                      threadId: input.threadId,
+                      turnId: ctx?.activeTurnId,
+                      payload: {
+                        taskId,
+                        status: "completed",
+                        summary: title,
+                        typedUsage: { totalTokens: 0, durationMs },
+                        ...linkage,
+                      },
+                      raw: {
+                        source: "acp.cursor.extension",
+                        method: "cursor/task",
+                        payload: params,
+                      },
+                    });
+                  }
+                }),
+              );
+            yield* acp.handleExtNotification(
+              "cursor/task",
+              CursorTaskRequest,
+              emitCursorTaskEvents,
+            );
+            yield* acp.handleExtRequest("cursor/task", CursorTaskRequest, (params) =>
+              emitCursorTaskEvents(params).pipe(
+                Effect.as({
+                  outcome: {
+                    outcome: "completed" as const,
+                    ...(params.agentId ? { agentId: params.agentId } : {}),
+                    ...(params.durationMs !== undefined ? { durationMs: params.durationMs } : {}),
+                  },
+                }),
+              ),
             );
             yield* acp.handleRequestPermission((params) =>
               mapExtensionFailure(
