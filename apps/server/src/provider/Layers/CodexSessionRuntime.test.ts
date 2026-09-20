@@ -15,6 +15,7 @@ import {
   buildTurnStartParams,
   describeMcpElicitation,
   hasConfiguredMcpServer,
+  isCodexThreadActiveWriterError,
   isRecoverableThreadResumeError,
   makeMemoryConsolidationNotificationFilter,
   openCodexThread,
@@ -888,6 +889,38 @@ describe("isRecoverableThreadResumeError", () => {
   });
 });
 
+describe("isCodexThreadActiveWriterError", () => {
+  it("matches only the Codex single-writer conflict", () => {
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "thread provider-thread-1 already has an active writer",
+        }),
+      ),
+      true,
+    );
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32603,
+          errorMessage: "thread provider-thread-1 already has an active writer",
+        }),
+      ),
+      false,
+    );
+    NodeAssert.equal(
+      isCodexThreadActiveWriterError(
+        new CodexErrors.CodexAppServerRequestError({
+          code: -32600,
+          errorMessage: "thread provider-thread-1 is archived",
+        }),
+      ),
+      false,
+    );
+  });
+});
+
 describe("openCodexThread", () => {
   it.effect("resumes metadata when historical turns contain unknown error values", () =>
     Effect.gen(function* () {
@@ -983,13 +1016,18 @@ describe("openCodexThread", () => {
 
   it.effect("falls back to thread/start when resume fails recoverably", () =>
     Effect.gen(function* () {
-      const calls: Array<{ method: "thread/start" | "thread/resume"; payload: unknown }> = [];
+      const calls: Array<{
+        method: "thread/start" | "thread/resume" | "thread/fork";
+        payload: unknown;
+      }> = [];
       const started = makeThreadOpenResponse("fresh-thread");
       const client = {
         raw: {
           request: (
-            method: "thread/resume",
-            payload: CodexRpc.ClientRequestParamsByMethod["thread/resume"],
+            method: "thread/resume" | "thread/fork",
+            payload:
+              | CodexRpc.ClientRequestParamsByMethod["thread/resume"]
+              | CodexRpc.ClientRequestParamsByMethod["thread/fork"],
           ) => {
             calls.push({ method, payload });
             return Effect.fail(
@@ -1024,6 +1062,51 @@ describe("openCodexThread", () => {
         calls.map((call) => call.method),
         ["thread/resume", "thread/start"],
       );
+    }),
+  );
+
+  it.effect("forks the resumed thread when Codex reports another active writer", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ method: "thread/resume" | "thread/fork"; payload: unknown }> = [];
+      const forked = makeThreadOpenResponse("forked-thread");
+      const opened = yield* openCodexThread({
+        client: {
+          request: () => Effect.die("An active-writer conflict must fork, not start fresh"),
+          raw: {
+            request: (method, payload) => {
+              calls.push({ method, payload });
+              return method === "thread/resume"
+                ? Effect.fail(
+                    new CodexErrors.CodexAppServerRequestError({
+                      code: -32600,
+                      errorMessage: "thread provider-thread-1 already has an active writer",
+                    }),
+                  )
+                : Effect.succeed(forked);
+            },
+          },
+        },
+        threadId: ThreadId.make("thread-1"),
+        runtimeMode: "full-access",
+        cwd: "/tmp/project",
+        requestedModel: "gpt-5.3-codex",
+        serviceTier: undefined,
+        resumeThreadId: "provider-thread-1",
+      });
+
+      NodeAssert.equal(opened.thread.id, "forked-thread");
+      NodeAssert.deepStrictEqual(
+        calls.map((call) => call.method),
+        ["thread/resume", "thread/fork"],
+      );
+      NodeAssert.deepStrictEqual(calls[1]?.payload, {
+        threadId: "provider-thread-1",
+        cwd: "/tmp/project",
+        approvalPolicy: "never",
+        sandbox: "danger-full-access",
+        approvalsReviewer: "user",
+        model: "gpt-5.3-codex",
+      });
     }),
   );
 

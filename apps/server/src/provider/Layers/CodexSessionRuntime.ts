@@ -44,6 +44,7 @@ import {
   type T3CodeToolAvailability,
 } from "../CodexDeveloperInstructions.ts";
 const decodeV2TurnStartResponse = Schema.decodeUnknownEffect(EffectCodexSchema.V2TurnStartResponse);
+const isCodexAppServerRequestError = Schema.is(CodexErrors.CodexAppServerRequestError);
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -695,6 +696,14 @@ export function isRecoverableThreadResumeError(error: unknown): boolean {
   return RECOVERABLE_THREAD_RESUME_ERROR_SNIPPETS.some((snippet) => message.includes(snippet));
 }
 
+export function isCodexThreadActiveWriterError(error: unknown): boolean {
+  if (!isCodexAppServerRequestError(error) || error.code !== -32600) {
+    return false;
+  }
+  const message = error.errorMessage.toLowerCase();
+  return message.includes("thread") && message.includes("already has an active writer");
+}
+
 const CodexThreadResumeMetadata = Schema.Struct({
   cwd: Schema.String,
   model: Schema.String,
@@ -705,10 +714,12 @@ const decodeCodexThreadResumeMetadata = Schema.decodeUnknownEffect(CodexThreadRe
 interface CodexThreadOpenClient {
   readonly raw: {
     readonly request: (
-      method: "thread/resume",
-      payload: CodexRpc.ClientRequestParamsByMethod["thread/resume"] & {
-        readonly excludeTurns?: boolean;
-      },
+      method: "thread/resume" | "thread/fork",
+      payload:
+        | (CodexRpc.ClientRequestParamsByMethod["thread/resume"] & {
+            readonly excludeTurns?: boolean;
+          })
+        | CodexRpc.ClientRequestParamsByMethod["thread/fork"],
     ) => Effect.Effect<unknown, CodexErrors.CodexAppServerError>;
   };
   readonly request: (
@@ -741,6 +752,24 @@ export const openCodexThread = (input: {
     return input.client.request("thread/start", startParams);
   }
 
+  const threadConfig = runtimeModeToThreadConfig(input.runtimeMode);
+  const forkParams = {
+    threadId: resumeThreadId,
+    cwd: input.cwd,
+    approvalPolicy: threadConfig.approvalPolicy,
+    sandbox: threadConfig.sandbox,
+    approvalsReviewer: threadConfig.approvalsReviewer,
+    ...(input.requestedModel ? { model: input.requestedModel } : {}),
+    ...(input.serviceTier ? { serviceTier: input.serviceTier } : {}),
+  } satisfies EffectCodexSchema.V2ThreadForkParams;
+
+  const decodeThreadOpenMetadata = (method: "thread/resume" | "thread/fork", response: unknown) =>
+    decodeCodexThreadResumeMetadata(response).pipe(
+      Effect.mapError((error) =>
+        CodexErrors.CodexAppServerRequestError.invalidPayload(method, "decode-payload", error),
+      ),
+    );
+
   // Older providers may still return history despite excludeTurns. Only the
   // session metadata is needed here, so unrelated historical items cannot
   // prevent resuming a valid provider thread.
@@ -751,15 +780,17 @@ export const openCodexThread = (input: {
       excludeTurns: true,
     })
     .pipe(
-      Effect.flatMap((response) =>
-        decodeCodexThreadResumeMetadata(response).pipe(
-          Effect.mapError((error) =>
-            CodexErrors.CodexAppServerRequestError.invalidPayload(
-              "thread/resume",
-              "decode-payload",
-              error,
-            ),
-          ),
+      Effect.flatMap((response) => decodeThreadOpenMetadata("thread/resume", response)),
+      Effect.catchIf(isCodexThreadActiveWriterError, (error) =>
+        Effect.logWarning("codex app-server thread resume forked around an active writer", {
+          threadId: input.threadId,
+          requestedRuntimeMode: input.runtimeMode,
+          resumeThreadId,
+          recoverable: true,
+          cause: error,
+        }).pipe(
+          Effect.andThen(input.client.raw.request("thread/fork", forkParams)),
+          Effect.flatMap((response) => decodeThreadOpenMetadata("thread/fork", response)),
         ),
       ),
       Effect.catchIf(isRecoverableThreadResumeError, (error) =>
