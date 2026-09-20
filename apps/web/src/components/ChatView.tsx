@@ -6310,6 +6310,9 @@ function ChatViewContent(props: ChatViewProps) {
         }),
       );
     }
+    promptRef.current = "";
+    clearComposerDraftContent(composerDraftTarget);
+    composerRef.current?.resetCursorState();
     let firstComposerImageName: string | null = null;
     if (composerImagesSnapshot.length > 0) {
       const firstComposerImage = composerImagesSnapshot[0];
