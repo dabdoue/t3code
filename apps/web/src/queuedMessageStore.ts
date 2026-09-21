@@ -21,15 +21,11 @@ export interface QueuedComposerMessage {
   previewAnnotations: PreviewAnnotationPayload[];
   reviewComments: ReviewCommentContext[];
   submissionIntent: ComposerSubmissionIntent;
+  /** Kept while reading queue entries written by the short-lived tool-boundary implementation. */
+  queuedAfterToolActivityId?: string | null;
   /**
-   * The newest completed tool activity at queue time. A different id later
-   * means a tool call finished after the user queued, which is the boundary
-   * the message goes out on.
-   */
-  queuedAfterToolActivityId: string | null;
-  /**
-   * Set when the message was created by Stop or a failed restore, not by the
-   * user pressing send. It waits for Send now instead of leaving on its own.
+   * Set when a failed send is returned to the queue. It waits for Send now
+   * instead of retrying on every ready-state projection.
    */
   holdUntilUserAction?: boolean;
   createdAt: string;
@@ -37,6 +33,8 @@ export interface QueuedComposerMessage {
 
 interface QueuedMessageStoreState {
   queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
+  /** A restored queue is deliberately held until the user opts back in. */
+  autoSendByThreadKey: Record<string, boolean>;
   /**
    * Bumped by `drain`. A send that took a message before a drain and finishes
    * its upload after it compares this to the value it captured and gives up,
@@ -44,64 +42,164 @@ interface QueuedMessageStoreState {
    */
   drainGeneration: number;
   enqueue: (threadKey: string, message: Omit<QueuedComposerMessage, "id">) => QueuedComposerMessage;
-  /**
-   * Removes one message and returns it, or null when another caller already
-   * took it. The remaining messages are re-anchored to `toolActivityId` so
-   * only one queued message leaves per tool boundary.
-   */
-  take: (
-    threadKey: string,
-    id: string,
-    toolActivityId: string | null,
-  ) => QueuedComposerMessage | null;
+  /** Removes one message and returns it, or null when another caller already took it. */
+  take: (threadKey: string, id: string) => QueuedComposerMessage | null;
   /** Removes one message without touching the others' anchors. Null when already gone. */
   remove: (threadKey: string, id: string) => QueuedComposerMessage | null;
   /**
    * Puts a message back at the head, held for user action. Used when its
    * send failed: the queue keeps its order and nothing behind it overtakes.
    */
-  holdAtFront: (threadKey: string, message: QueuedComposerMessage) => void;
+  holdAtFront: (
+    threadKey: string,
+    message: QueuedComposerMessage,
+    holdUntilUserAction?: boolean,
+  ) => void;
+  setAutoSend: (threadKey: string, enabled: boolean) => void;
+  reorder: (threadKey: string, orderedIds: ReadonlyArray<string>) => void;
   /** Removes and returns every queued message for the thread, oldest first. */
   drain: (threadKey: string) => QueuedComposerMessage[];
 }
 
 const EMPTY_QUEUE: QueuedComposerMessage[] = [];
 
-/** In-memory only: a queued message is a live intent, not a draft worth persisting. */
+export const QUEUED_MESSAGE_STORAGE_KEY = "t3code:queued-composer-messages:v1";
+
+interface PersistedQueueState {
+  readonly queuesByThreadKey: Record<string, QueuedComposerMessage[]>;
+}
+
+function storage(): Storage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function hydrateImage(image: ComposerImageAttachment): ComposerImageAttachment | null {
+  if (typeof File !== "undefined" && image.file instanceof File) return image;
+  const dataUrl = image.previewUrl;
+  if (!dataUrl?.startsWith("data:")) return null;
+  try {
+    const comma = dataUrl.indexOf(",");
+    const header = dataUrl.slice(0, comma);
+    const body = dataUrl.slice(comma + 1);
+    const bytes = header.includes(";base64")
+      ? Uint8Array.from(atob(body), (character) => character.charCodeAt(0))
+      : new TextEncoder().encode(decodeURIComponent(body));
+    return { ...image, file: new File([bytes], image.name, { type: image.mimeType }) };
+  } catch {
+    return null;
+  }
+}
+
+export function hydratePersistedQueueState(
+  value: unknown,
+): Record<string, QueuedComposerMessage[]> {
+  try {
+    const parsed = value as Partial<PersistedQueueState>;
+    if (!parsed?.queuesByThreadKey || typeof parsed.queuesByThreadKey !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(parsed.queuesByThreadKey).flatMap(([threadKey, messages]) => {
+        if (!Array.isArray(messages)) return [];
+        const hydrated = messages.flatMap((message) => {
+          if (!message || typeof message !== "object" || typeof message.id !== "string") return [];
+          return [
+            {
+              ...message,
+              images: (message.images ?? []).flatMap((image) => {
+                const hydratedImage = hydrateImage(image);
+                return hydratedImage ? [hydratedImage] : [];
+              }),
+              // Browser File handles cannot cross a process restart. Finished
+              // uploads retain their attachment id; unfinished files remain as
+              // visible needs-reattach rows instead of disappearing.
+              files: (message.files ?? []).map((file) => ({ ...file, file: null })),
+            },
+          ];
+        });
+        return hydrated.length > 0 ? [[threadKey, hydrated] as const] : [];
+      }),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function readPersistedQueues(): Record<string, QueuedComposerMessage[]> {
+  try {
+    const raw = storage()?.getItem(QUEUED_MESSAGE_STORAGE_KEY);
+    return raw ? hydratePersistedQueueState(JSON.parse(raw)) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function restoredQueueAutoSendState(
+  queuesByThreadKey: Record<string, QueuedComposerMessage[]>,
+): Record<string, boolean> {
+  return Object.fromEntries(Object.keys(queuesByThreadKey).map((threadKey) => [threadKey, false]));
+}
+
+function persistQueues(queuesByThreadKey: Record<string, QueuedComposerMessage[]>): void {
+  try {
+    storage()?.setItem(
+      QUEUED_MESSAGE_STORAGE_KEY,
+      JSON.stringify({ queuesByThreadKey }, (key, value: unknown) =>
+        key === "file" ? undefined : value,
+      ),
+    );
+  } catch (error) {
+    console.error("[QUEUED-MESSAGES] Could not persist queued messages.", error);
+  }
+}
+
+const persistedQueues = readPersistedQueues();
+const restoredAutoSend = restoredQueueAutoSendState(persistedQueues);
+
 export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get) => ({
-  queuesByThreadKey: {},
+  queuesByThreadKey: persistedQueues,
+  autoSendByThreadKey: restoredAutoSend,
   drainGeneration: 0,
   enqueue: (threadKey, message) => {
     const entry: QueuedComposerMessage = { ...message, id: randomUUID() };
-    set((state) => ({
-      queuesByThreadKey: {
+    set((state) => {
+      const queuesByThreadKey = {
         ...state.queuesByThreadKey,
         [threadKey]: [...(state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE), entry],
-      },
-    }));
+      };
+      persistQueues(queuesByThreadKey);
+      return {
+        queuesByThreadKey,
+        autoSendByThreadKey: {
+          ...state.autoSendByThreadKey,
+          [threadKey]: state.autoSendByThreadKey[threadKey] ?? true,
+        },
+      };
+    });
     return entry;
   },
-  take: (threadKey, id, toolActivityId) => {
+  take: (threadKey, id) => {
     const queue = get().queuesByThreadKey[threadKey];
     const entry = queue?.find((message) => message.id === id);
     if (!queue || !entry) {
       return null;
     }
     set((state) => {
-      const remaining = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE)
-        .filter((message) => message.id !== id)
-        .map((message) =>
-          message.queuedAfterToolActivityId === toolActivityId
-            ? message
-            : { ...message, queuedAfterToolActivityId: toolActivityId },
-        );
+      const remaining = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
+        (message) => message.id !== id,
+      );
       const queuesByThreadKey = { ...state.queuesByThreadKey };
+      const autoSendByThreadKey = { ...state.autoSendByThreadKey };
       if (remaining.length === 0) {
         delete queuesByThreadKey[threadKey];
+        delete autoSendByThreadKey[threadKey];
       } else {
         queuesByThreadKey[threadKey] = remaining;
       }
-      return { queuesByThreadKey };
+      persistQueues(queuesByThreadKey);
+      return { queuesByThreadKey, autoSendByThreadKey };
     });
     return entry;
   },
@@ -116,26 +214,55 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
         (message) => message.id !== id,
       );
       const queuesByThreadKey = { ...state.queuesByThreadKey };
+      const autoSendByThreadKey = { ...state.autoSendByThreadKey };
       if (remaining.length === 0) {
         delete queuesByThreadKey[threadKey];
+        delete autoSendByThreadKey[threadKey];
       } else {
         queuesByThreadKey[threadKey] = remaining;
       }
-      return { queuesByThreadKey };
+      persistQueues(queuesByThreadKey);
+      return { queuesByThreadKey, autoSendByThreadKey };
     });
     return entry;
   },
-  holdAtFront: (threadKey, message) => {
+  holdAtFront: (threadKey, message, holdUntilUserAction = true) => {
     set((state) => {
       const rest = (state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE).filter(
         (entry) => entry.id !== message.id,
       );
-      return {
-        queuesByThreadKey: {
-          ...state.queuesByThreadKey,
-          [threadKey]: [{ ...message, holdUntilUserAction: true }, ...rest],
-        },
+      const queuesByThreadKey = {
+        ...state.queuesByThreadKey,
+        [threadKey]: [{ ...message, holdUntilUserAction }, ...rest],
       };
+      persistQueues(queuesByThreadKey);
+      return { queuesByThreadKey };
+    });
+  },
+  setAutoSend: (threadKey, enabled) => {
+    set((state) => ({
+      autoSendByThreadKey: { ...state.autoSendByThreadKey, [threadKey]: enabled },
+      // Turning auto-send off also cancels an upload/send which took the head
+      // but has not dispatched yet. The send path compares this generation.
+      drainGeneration: state.drainGeneration + (enabled ? 0 : 1),
+    }));
+  },
+  reorder: (threadKey, orderedIds) => {
+    set((state) => {
+      const queue = state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE;
+      const byId = new Map(queue.map((message) => [message.id, message]));
+      const reordered = [
+        ...orderedIds.flatMap((id) => {
+          const message = byId.get(id);
+          if (!message) return [];
+          byId.delete(id);
+          return [message];
+        }),
+        ...byId.values(),
+      ];
+      const queuesByThreadKey = { ...state.queuesByThreadKey, [threadKey]: reordered };
+      persistQueues(queuesByThreadKey);
+      return { queuesByThreadKey };
     });
   },
   drain: (threadKey) => {
@@ -146,56 +273,44 @@ export const useQueuedMessageStore = create<QueuedMessageStoreState>()((set, get
     set((state) => {
       const queuesByThreadKey = { ...state.queuesByThreadKey };
       delete queuesByThreadKey[threadKey];
-      return { queuesByThreadKey, drainGeneration: state.drainGeneration + 1 };
+      const autoSendByThreadKey = { ...state.autoSendByThreadKey };
+      delete autoSendByThreadKey[threadKey];
+      persistQueues(queuesByThreadKey);
+      return { queuesByThreadKey, autoSendByThreadKey, drainGeneration: state.drainGeneration + 1 };
     });
     return queue;
   },
 }));
 
 /**
- * The newest finished tool call. Its id changing is the boundary a queued
- * message goes out on. Live arrays are sorted, but a snapshot loaded from the
- * database is not, so pick by sequence rather than position.
- */
-export function latestCompletedToolActivityId(
-  activities: ReadonlyArray<{
-    readonly id: string;
-    readonly kind: string;
-    readonly sequence?: number | undefined;
-    readonly createdAt: string;
-  }>,
-): string | null {
-  let latest: (typeof activities)[number] | null = null;
-  for (const activity of activities) {
-    if (activity.kind !== "tool.completed") continue;
-    if (
-      latest === null ||
-      (activity.sequence ?? -1) > (latest.sequence ?? -1) ||
-      ((activity.sequence ?? -1) === (latest.sequence ?? -1) &&
-        activity.createdAt > latest.createdAt)
-    ) {
-      latest = activity;
-    }
-  }
-  return latest?.id ?? null;
-}
-
-/**
- * A queued message is due mid-turn once a tool call finished after it was
- * queued, and as soon as the turn is over otherwise. "connecting" is the gap
- * between a send and the provider picking it up, so nothing is due there.
+ * Queue means a subsequent turn: only a ready thread with Auto-send enabled
+ * can drain. Explicit Send now/Steer bypasses this predicate.
  */
 export function isQueuedMessageDue(input: {
-  message: Pick<QueuedComposerMessage, "queuedAfterToolActivityId" | "holdUntilUserAction">;
+  message: Pick<QueuedComposerMessage, "holdUntilUserAction">;
   phase: "connecting" | "running" | "ready" | "disconnected";
-  latestToolActivityId: string | null;
+  autoSend: boolean;
 }): boolean {
-  if (input.message.holdUntilUserAction) return false;
-  if (input.phase === "connecting") return false;
-  if (input.phase !== "running") return true;
-  return input.latestToolActivityId !== input.message.queuedAfterToolActivityId;
+  return input.autoSend && !input.message.holdUntilUserAction && input.phase === "ready";
 }
 
 export function useQueuedMessages(threadKey: string): QueuedComposerMessage[] {
   return useQueuedMessageStore((state) => state.queuesByThreadKey[threadKey] ?? EMPTY_QUEUE);
+}
+
+export function useQueuedMessageAutoSend(threadKey: string): boolean {
+  return useQueuedMessageStore((state) => state.autoSendByThreadKey[threadKey] ?? false);
+}
+
+// Other windows attached to the same T3 origin see the durable queue too.
+// Pause after an external update so two clients cannot race to drain it.
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+  window.addEventListener("storage", (event) => {
+    if (event.key !== QUEUED_MESSAGE_STORAGE_KEY) return;
+    const queuesByThreadKey = readPersistedQueues();
+    useQueuedMessageStore.setState({
+      queuesByThreadKey,
+      autoSendByThreadKey: restoredQueueAutoSendState(queuesByThreadKey),
+    });
+  });
 }

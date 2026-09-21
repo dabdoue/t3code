@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
+  hydratePersistedQueueState,
   isQueuedMessageDue,
-  latestCompletedToolActivityId,
+  restoredQueueAutoSendState,
   useQueuedMessageStore,
   type QueuedComposerMessage,
 } from "./queuedMessageStore";
@@ -16,14 +17,17 @@ function makeMessage(prompt: string): Omit<QueuedComposerMessage, "id"> {
     previewAnnotations: [],
     reviewComments: [],
     submissionIntent: "foreground",
-    queuedAfterToolActivityId: null,
     createdAt: "2026-09-11T00:00:00.000Z",
   };
 }
 
 describe("queuedMessageStore", () => {
   beforeEach(() => {
-    useQueuedMessageStore.setState({ queuesByThreadKey: {}, drainGeneration: 0 });
+    useQueuedMessageStore.setState({
+      queuesByThreadKey: {},
+      autoSendByThreadKey: {},
+      drainGeneration: 0,
+    });
   });
 
   it("keeps messages in submission order per thread", () => {
@@ -41,28 +45,25 @@ describe("queuedMessageStore", () => {
     const { enqueue, take } = useQueuedMessageStore.getState();
     const entry = enqueue("thread-a", makeMessage("first"));
 
-    expect(take("thread-a", entry.id, null)?.prompt).toBe("first");
-    expect(take("thread-a", entry.id, null)).toBeNull();
+    expect(take("thread-a", entry.id)?.prompt).toBe("first");
+    expect(take("thread-a", entry.id)).toBeNull();
     expect(useQueuedMessageStore.getState().queuesByThreadKey["thread-a"]).toBeUndefined();
   });
 
-  it("take re-anchors the remaining messages to the current tool boundary", () => {
+  it("take leaves the remaining messages in FIFO order", () => {
     const { enqueue, take } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
     enqueue("thread-a", makeMessage("second"));
 
-    take("thread-a", first.id, "tool-2");
+    take("thread-a", first.id);
 
     const [second] = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
-    expect(second?.queuedAfterToolActivityId).toBe("tool-2");
-    expect(
-      isQueuedMessageDue({ message: second!, phase: "running", latestToolActivityId: "tool-2" }),
-    ).toBe(false);
+    expect(second?.prompt).toBe("second");
   });
 
-  it("remove keeps the other messages' anchors", () => {
+  it("remove leaves the other messages unchanged", () => {
     const { enqueue, remove } = useQueuedMessageStore.getState();
-    const first = enqueue("thread-a", { ...makeMessage("first"), queuedAfterToolActivityId: "t1" });
+    const first = enqueue("thread-a", makeMessage("first"));
     const second = enqueue("thread-a", makeMessage("second"));
 
     expect(remove("thread-a", second.id)?.prompt).toBe("second");
@@ -74,16 +75,25 @@ describe("queuedMessageStore", () => {
     const { enqueue, take, holdAtFront } = useQueuedMessageStore.getState();
     const first = enqueue("thread-a", makeMessage("first"));
     enqueue("thread-a", makeMessage("second"));
-    const taken = take("thread-a", first.id, "t1")!;
+    const taken = take("thread-a", first.id)!;
 
     holdAtFront("thread-a", taken);
 
     const queue = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
     expect(queue.map((message) => message.prompt)).toEqual(["first", "second"]);
     expect(queue[0]?.holdUntilUserAction).toBe(true);
-    expect(
-      isQueuedMessageDue({ message: queue[0]!, phase: "ready", latestToolActivityId: null }),
-    ).toBe(false);
+    expect(isQueuedMessageDue({ message: queue[0]!, phase: "ready", autoSend: true })).toBe(false);
+  });
+
+  it("can return a cancelled in-flight message without forcing a manual retry", () => {
+    const { enqueue, take, holdAtFront } = useQueuedMessageStore.getState();
+    const first = enqueue("thread-a", makeMessage("first"));
+    const taken = take("thread-a", first.id)!;
+
+    holdAtFront("thread-a", taken, false);
+
+    const [restored] = useQueuedMessageStore.getState().queuesByThreadKey["thread-a"] ?? [];
+    expect(restored?.holdUntilUserAction).toBe(false);
   });
 
   it("drain empties one thread's queue in order", () => {
@@ -100,44 +110,75 @@ describe("queuedMessageStore", () => {
   });
 });
 
-describe("queued message dispatch timing", () => {
-  const activities = [
-    { id: "a1", kind: "tool.started", sequence: 1, createdAt: "2026-01-01T00:00:01Z" },
-    { id: "a2", kind: "tool.completed", sequence: 2, createdAt: "2026-01-01T00:00:02Z" },
-    { id: "a3", kind: "tool.updated", sequence: 3, createdAt: "2026-01-01T00:00:03Z" },
-  ];
+describe("queued message restart recovery", () => {
+  it("restores metadata-only files visibly and pauses every recovered thread", () => {
+    const message = {
+      ...makeMessage("with a file"),
+      id: "message-1",
+      files: [
+        {
+          type: "file" as const,
+          id: "file-1",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 12,
+          file: { processLocal: true },
+        },
+      ],
+    };
 
-  it("finds the newest completed tool call by sequence, not position", () => {
-    expect(latestCompletedToolActivityId(activities)).toBe("a2");
-    expect(latestCompletedToolActivityId([])).toBeNull();
-    expect(
-      latestCompletedToolActivityId([
-        { id: "late", kind: "tool.completed", sequence: 9, createdAt: "2026-01-01T00:00:09Z" },
-        { id: "early", kind: "tool.completed", sequence: 4, createdAt: "2026-01-01T00:00:04Z" },
-      ]),
-    ).toBe("late");
+    const queues = hydratePersistedQueueState({ queuesByThreadKey: { "thread-a": [message] } });
+
+    expect(queues["thread-a"]?.[0]?.files[0]).toMatchObject({
+      name: "notes.txt",
+      file: null,
+    });
+    expect(restoredQueueAutoSendState(queues)).toEqual({ "thread-a": false });
   });
 
-  it("waits mid-turn until a tool call finishes after the message was queued", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
-    expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a2" })).toBe(
-      false,
-    );
-    expect(isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a4" })).toBe(
-      true,
-    );
+  it("preserves a completed upload id while dropping its process-local File handle", () => {
+    const message = {
+      ...makeMessage("uploaded file"),
+      id: "message-1",
+      files: [
+        {
+          type: "file" as const,
+          id: "file-1",
+          name: "notes.txt",
+          mimeType: "text/plain",
+          sizeBytes: 12,
+          file: { processLocal: true },
+          uploadedAttachmentId: "attachment-1",
+          uploadEnvironmentId: "environment-1",
+        },
+      ],
+    };
+
+    const queues = hydratePersistedQueueState({ queuesByThreadKey: { "thread-a": [message] } });
+
+    expect(queues["thread-a"]?.[0]?.files[0]).toMatchObject({
+      file: null,
+      uploadedAttachmentId: "attachment-1",
+      uploadEnvironmentId: "environment-1",
+    });
+  });
+});
+
+describe("queued message dispatch timing", () => {
+  it("waits for the turn to finish regardless of later tool activity", () => {
+    const message = {};
+    expect(isQueuedMessageDue({ message, phase: "running", autoSend: true })).toBe(false);
+    expect(isQueuedMessageDue({ message, phase: "ready", autoSend: true })).toBe(true);
   });
 
   it("never auto-sends a message held for user action", () => {
-    const message = { queuedAfterToolActivityId: null, holdUntilUserAction: true };
-    expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a4" })).toBe(false);
+    const message = { holdUntilUserAction: true };
+    expect(isQueuedMessageDue({ message, phase: "ready", autoSend: true })).toBe(false);
   });
 
-  it("is due as soon as the turn is over, but not while a send is connecting", () => {
-    const message = { queuedAfterToolActivityId: "a2" };
-    expect(isQueuedMessageDue({ message, phase: "ready", latestToolActivityId: "a2" })).toBe(true);
-    expect(isQueuedMessageDue({ message, phase: "connecting", latestToolActivityId: "a4" })).toBe(
-      false,
-    );
+  it("requires auto-send and a ready thread", () => {
+    const message = {};
+    expect(isQueuedMessageDue({ message, phase: "ready", autoSend: false })).toBe(false);
+    expect(isQueuedMessageDue({ message, phase: "connecting", autoSend: true })).toBe(false);
   });
 });
