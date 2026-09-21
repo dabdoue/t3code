@@ -49,9 +49,29 @@ import {
 import { ProviderAdapterProcessError, ProviderAdapterValidationError } from "../Errors.ts";
 import type { ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
 import type { ClaudeScopedLimitNames } from "./claudeUsageLimits.ts";
-import { makeClaudeAdapter, type ClaudeAdapterLiveOptions } from "./ClaudeAdapter.ts";
+import {
+  claudeContextWindowFromModelUsage,
+  makeClaudeAdapter,
+  type ClaudeAdapterLiveOptions,
+} from "./ClaudeAdapter.ts";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+describe("Claude context-window telemetry", () => {
+  it("uses the active main model instead of the largest subagent window", () => {
+    const modelUsage = {
+      "main-model": { contextWindow: 200_000 },
+      "subagent-model": { contextWindow: 1_000_000 },
+    } as never;
+    assert.equal(claudeContextWindowFromModelUsage(modelUsage, "main-model"), 200_000);
+    assert.equal(claudeContextWindowFromModelUsage(modelUsage, "missing-model"), undefined);
+  });
+
+  it("matches a suffixed active model to its base telemetry key", () => {
+    const modelUsage = { "main-model": { contextWindow: 1_000_000 } } as never;
+    assert.equal(claudeContextWindowFromModelUsage(modelUsage, "main-model[1m]"), 1_000_000);
+  });
+});
 
 // Test-local service tag so the rest of the file can keep using `yield* ClaudeAdapter`.
 class ClaudeAdapter extends Context.Service<ClaudeAdapter, ClaudeAdapterShape>()(
@@ -561,6 +581,29 @@ describe("ClaudeAdapterLive", () => {
         autoCompactWindow: 300000,
       });
       assert.deepEqual(options?.supportedDialogKinds, ["resume_return"]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("passes the provider-wide standard-context switch to Claude", () => {
+    const harness = makeHarness({
+      claudeConfig: { disable1mContext: true },
+      environment: { PATH: "/synthetic/bin" },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+
+      assert.equal(
+        harness.getLastCreateQueryInput()?.options.env?.CLAUDE_CODE_DISABLE_1M_CONTEXT,
+        "1",
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
@@ -5174,8 +5217,10 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
-  it.effect("emits Claude context window on result completion usage snapshots", () => {
-    const harness = makeHarness();
+  it.effect("keeps configured compaction threshold separate from enforced context capacity", () => {
+    const harness = makeHarness({
+      claudeConfig: { autoCompactWindow: "150000", disable1mContext: true },
+    });
     return Effect.gen(function* () {
       const adapter = yield* ClaudeAdapter;
 
@@ -5214,7 +5259,7 @@ describe("ClaudeAdapterLive", () => {
         },
         modelUsage: {
           [SYNTHETIC_CLAUDE_CAPABLE_MODEL]: {
-            contextWindow: 200000,
+            contextWindow: 1_000_000,
             maxOutputTokens: 64000,
           },
         },
@@ -5232,6 +5277,8 @@ describe("ClaudeAdapterLive", () => {
             inputTokens: 23863,
             outputTokens: 679,
             maxTokens: 200000,
+            compactsAutomatically: true,
+            autoCompactThreshold: 150000,
           },
         });
       }

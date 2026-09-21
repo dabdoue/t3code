@@ -172,12 +172,23 @@ describe("custom model settings", () => {
 
   it("accepts legacy bare slugs alongside full entries", () => {
     const decoded = decodeClaudeSettings({
-      customModels: ["bare-slug", { slug: "named", name: "Named", capabilities }],
+      customModels: [
+        "bare-slug",
+        { slug: "named", name: "Named", capabilities, contextWindowTokens: 200_000 },
+      ],
     });
     expect(decoded.customModels).toEqual([
       "bare-slug",
-      { slug: "named", name: "Named", capabilities },
+      { slug: "named", name: "Named", capabilities, contextWindowTokens: 200_000 },
     ]);
+  });
+
+  it("rejects invalid declared custom-model capacities", () => {
+    for (const contextWindowTokens of [0, -1, 1.5, Number.NaN, "200000"]) {
+      expect(() =>
+        decodeClaudeSettings({ customModels: [{ slug: "x", contextWindowTokens }] }),
+      ).toThrow();
+    }
   });
 
   it("accepts entries at the settings patch boundary", () => {
@@ -195,6 +206,7 @@ describe("custom model settings", () => {
 describe("ClaudeSettings auto-compaction", () => {
   it("uses Claude's default threshold when no override is configured", () => {
     expect(decodeClaudeSettings({}).autoCompactWindow).toBe("");
+    expect(decodeClaudeSettings({}).disable1mContext).toBe(false);
   });
 
   it.each(["100000", "300000", "1000000"])(
@@ -218,6 +230,10 @@ describe("ClaudeSettings auto-compaction", () => {
     expect(
       decodeServerSettingsPatch({ providers: { claudeAgent: { autoCompactWindow: "300000" } } }),
     ).toBeDefined();
+    expect(
+      decodeServerSettingsPatch({ providers: { claudeAgent: { disable1mContext: true } } })
+        .providers?.claudeAgent?.disable1mContext,
+    ).toBe(true);
   });
 });
 

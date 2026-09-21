@@ -2,6 +2,7 @@ import {
   type CustomModelSetting,
   type ModelCapabilities,
   type ModelSelection,
+  type ProviderOptionDescriptor,
   ProviderDriverKind,
   type ServerProviderModel,
 } from "@t3tools/contracts";
@@ -82,20 +83,48 @@ export const BUNDLED_CLAUDE_MODEL_CATALOG = resolveClaudeModelCatalog(BUNDLED_MO
 export function scopeClaudeModelCatalog(
   catalog: ClaudeModelCatalog,
   customModels: ReadonlyArray<CustomModelSetting>,
+  options?: { readonly disable1mContext?: boolean },
 ): ClaudeModelCatalog {
   const customEntries = readCustomModelEntries(customModels);
-  if (customEntries.length === 0) return catalog;
+  if (customEntries.length === 0 && !options?.disable1mContext) return catalog;
   const customAliases = new Set(customEntries.map((entry) => entry.slug.toLowerCase()));
 
   const builtInModels = catalog.models.map((entry) => {
-    if (!entry.model.aliases?.some((alias) => customAliases.has(alias.toLowerCase()))) {
-      return entry;
-    }
+    const aliases = entry.model.aliases?.filter((alias) => !customAliases.has(alias.toLowerCase()));
+    const capabilities = options?.disable1mContext
+      ? {
+          ...entry.model.capabilities,
+          optionDescriptors:
+            entry.model.capabilities?.optionDescriptors?.flatMap<ProviderOptionDescriptor>(
+              (descriptor) => {
+                if (descriptor.type !== "select" || descriptor.id !== "contextWindow") {
+                  return [descriptor];
+                }
+                const standardOptions = descriptor.options
+                  .filter((choice) => choice.id !== "1m")
+                  .map((choice, index) => {
+                    const { isDefault: _isDefault, ...rest } = choice;
+                    return index === 0 ? { ...rest, isDefault: true } : rest;
+                  });
+                return standardOptions.length > 0
+                  ? [
+                      {
+                        ...descriptor,
+                        options: standardOptions,
+                        currentValue: standardOptions[0]!.id,
+                      },
+                    ]
+                  : [];
+              },
+            ),
+        }
+      : entry.model.capabilities;
     return {
       ...entry,
       model: {
         ...entry.model,
-        aliases: entry.model.aliases.filter((alias) => !customAliases.has(alias.toLowerCase())),
+        ...(aliases ? { aliases } : {}),
+        ...(capabilities ? { capabilities } : {}),
       },
     };
   });
@@ -103,6 +132,10 @@ export function scopeClaudeModelCatalog(
   const customCatalogModels: Array<ClaudeCatalogModel> = [];
   for (const entry of customEntries) {
     if (!entry.capabilities || builtInSlugs.has(entry.slug)) continue;
+    const runtime: ClaudeCodeProfile =
+      entry.contextWindowTokens !== null
+        ? { fixedContextWindowTokens: entry.contextWindowTokens }
+        : {};
     customCatalogModels.push({
       model: {
         slug: entry.slug,
@@ -110,7 +143,7 @@ export function scopeClaudeModelCatalog(
         isCustom: true,
         capabilities: entry.capabilities,
       },
-      runtime: {},
+      runtime,
       compatibility: {},
     });
   }
@@ -258,4 +291,13 @@ export function resolveClaudeCatalogContextWindowTokens(
   if (entry.runtime.fixedContextWindowTokens) return entry.runtime.fixedContextWindowTokens;
   const contextWindow = resolveClaudeCatalogContextWindow(catalog, modelSelection);
   return contextWindow ? entry.runtime.contextWindowTokens?.[contextWindow] : undefined;
+}
+
+/** User-declared custom-model capacity, authoritative when runtime discovery is unreliable. */
+export function resolveClaudeCatalogDeclaredContextWindowTokens(
+  catalog: ClaudeModelCatalog,
+  modelSelection: ModelSelection | undefined,
+): number | undefined {
+  const entry = resolveClaudeCatalogModel(catalog, modelSelection?.model);
+  return entry?.model.isCustom ? entry.runtime.fixedContextWindowTokens : undefined;
 }

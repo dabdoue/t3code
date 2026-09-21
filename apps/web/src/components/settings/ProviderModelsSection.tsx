@@ -246,7 +246,10 @@ export function ProviderModelsSection({
     // which is also what lets the pending scroll target resolve and clear.
     scrollToSlugRef.current = normalized;
     setFilter("");
-    onChange([...customModels, { slug: normalized, name: normalized, capabilities: null }]);
+    onChange([
+      ...customModels,
+      { slug: normalized, name: normalized, capabilities: null, contextWindowTokens: null },
+    ]);
     setInput("");
     setError(null);
     setIsAdding(false);

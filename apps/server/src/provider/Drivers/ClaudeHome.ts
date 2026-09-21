@@ -34,13 +34,13 @@ export const resolveClaudeHomePath = Effect.fn("resolveClaudeHomePath")(function
 });
 
 export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function* (
-  config: Pick<ClaudeSettings, "homePath">,
+  config: Pick<ClaudeSettings, "homePath"> & { readonly disable1mContext?: boolean },
   baseEnv?: NodeJS.ProcessEnv,
 ): Effect.fn.Return<NodeJS.ProcessEnv, never, Path.Path> {
   const resolvedBaseEnv = baseEnv ?? process.env;
   const homePath = config.homePath.trim();
-  if (homePath.length === 0) return resolvedBaseEnv;
-  const resolvedHomePath = yield* resolveClaudeHomePath(config);
+  if (homePath.length === 0 && !config.disable1mContext) return resolvedBaseEnv;
+  const resolvedHomePath = homePath.length > 0 ? yield* resolveClaudeHomePath(config) : undefined;
   return {
     ...resolvedBaseEnv,
     // Isolate this instance's config via CLAUDE_CONFIG_DIR rather than HOME.
@@ -49,7 +49,8 @@ export const makeClaudeEnvironment = Effect.fn("makeClaudeEnvironment")(function
     // OAuth credentials and reports "Not logged in". CLAUDE_CONFIG_DIR points
     // Claude Code at its config dir directly while leaving HOME (and the
     // keychain) intact.
-    CLAUDE_CONFIG_DIR: resolvedHomePath,
+    ...(resolvedHomePath ? { CLAUDE_CONFIG_DIR: resolvedHomePath } : {}),
+    ...(config.disable1mContext ? { CLAUDE_CODE_DISABLE_1M_CONTEXT: "1" } : {}),
   };
 });
 
@@ -65,12 +66,14 @@ export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationG
 
 export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesCacheKey")(
   function* (
-    config: Pick<ClaudeSettings, "binaryPath" | "homePath">,
+    config: Pick<ClaudeSettings, "binaryPath" | "homePath"> & {
+      readonly disable1mContext?: boolean;
+    },
     cwd?: string,
     environment?: NodeJS.ProcessEnv,
   ): Effect.fn.Return<string, never, Path.Path> {
     const resolvedHomePath = yield* resolveClaudeHomePath(config, environment);
-    return `${config.binaryPath}\0${resolvedHomePath}\0${cwd ?? ""}`;
+    return `${config.binaryPath}\0${resolvedHomePath}\0${cwd ?? ""}\0${config.disable1mContext ? "200k" : "auto"}`;
   },
 );
 

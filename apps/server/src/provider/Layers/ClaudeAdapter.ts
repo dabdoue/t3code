@@ -102,6 +102,7 @@ import {
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
   resolveClaudeCatalogContextWindowTokens,
+  resolveClaudeCatalogDeclaredContextWindowTokens,
   resolveClaudeCatalogEffort,
   resolveClaudeModelSlug,
   scopeClaudeModelCatalog,
@@ -446,6 +447,8 @@ interface ClaudeSessionContext {
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
   turnState: ClaudeTurnState | undefined;
+  /** Explicit custom-model capacity or provider-wide standard-context override. */
+  declaredContextWindow: number | undefined;
   lastKnownContextWindow: number | undefined;
   lastKnownTokenUsage: ThreadTokenUsageSnapshot | undefined;
   lastKnownTotalProcessedTokens: number | undefined;
@@ -670,18 +673,18 @@ function asRuntimeItemId(value: string): RuntimeItemId {
   return RuntimeItemId.make(value);
 }
 
-function maxClaudeContextWindowFromModelUsage(
+export function claudeContextWindowFromModelUsage(
   modelUsage: Record<string, ModelUsage> | undefined,
+  currentApiModelId: string | undefined,
 ): number | undefined {
   if (!modelUsage) return undefined;
-
-  let maxContextWindow: number | undefined;
-  for (const value of Object.values(modelUsage)) {
-    const contextWindow = value.contextWindow;
-    maxContextWindow = Math.max(maxContextWindow ?? 0, contextWindow);
-  }
-
-  return maxContextWindow;
+  const exact = currentApiModelId ? modelUsage[currentApiModelId]?.contextWindow : undefined;
+  if (exact !== undefined) return exact;
+  const baseModelId = currentApiModelId?.replace(/\[[^\]]+\]$/u, "");
+  const base = baseModelId ? modelUsage[baseModelId]?.contextWindow : undefined;
+  if (base !== undefined) return base;
+  const entries = Object.values(modelUsage);
+  return entries.length === 1 ? entries[0]?.contextWindow : undefined;
 }
 
 function selectedClaudeContextWindow(
@@ -2071,7 +2074,16 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("claudeAgent");
   const modelCatalogEffect = (
     options?.modelCatalog ?? Effect.succeed(BUNDLED_CLAUDE_MODEL_CATALOG)
-  ).pipe(Effect.map((catalog) => scopeClaudeModelCatalog(catalog, claudeSettings.customModels)));
+  ).pipe(
+    Effect.map((catalog) =>
+      scopeClaudeModelCatalog(catalog, claudeSettings.customModels, {
+        disable1mContext: claudeSettings.disable1mContext,
+      }),
+    ),
+  );
+  const configuredAutoCompactWindow = claudeSettings.autoCompactWindow
+    ? Number(claudeSettings.autoCompactWindow)
+    : undefined;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig;
@@ -2545,9 +2557,22 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       return;
     }
 
-    context.lastKnownTokenUsage = usage;
+    const autoCompactThreshold =
+      configuredAutoCompactWindow !== undefined
+        ? Math.min(configuredAutoCompactWindow, usage.maxTokens ?? configuredAutoCompactWindow)
+        : undefined;
+    const emittedUsage =
+      autoCompactThreshold !== undefined
+        ? {
+            ...usage,
+            compactsAutomatically: true,
+            autoCompactThreshold,
+          }
+        : usage;
+
+    context.lastKnownTokenUsage = emittedUsage;
     context.lastKnownTotalProcessedTokens =
-      usage.totalProcessedTokens ?? context.lastKnownTotalProcessedTokens;
+      emittedUsage.totalProcessedTokens ?? context.lastKnownTotalProcessedTokens;
 
     const turnState = context.turnState;
     const stamp = yield* makeEventStamp();
@@ -2559,7 +2584,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       threadId: context.session.threadId,
       ...(turnState ? { turnId: turnState.turnId } : {}),
       payload: {
-        usage,
+        usage: emittedUsage,
       },
       providerRefs: nativeProviderRefs(context),
       ...(options?.rawMethod || options?.rawPayload
@@ -2663,7 +2688,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     errorMessage?: string,
     result?: SDKResultMessage,
   ) {
-    const resultContextWindow = maxClaudeContextWindowFromModelUsage(result?.modelUsage);
+    const reportedContextWindow = claudeContextWindowFromModelUsage(
+      result?.modelUsage,
+      context.currentApiModelId,
+    );
+    const resultContextWindow = context.declaredContextWindow ?? reportedContextWindow;
     if (resultContextWindow !== undefined) {
       context.lastKnownContextWindow = resultContextWindow;
     }
@@ -4849,7 +4878,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       const apiModelId = modelSelection
         ? resolveClaudeCatalogApiModelId(modelCatalog, modelSelection)
         : undefined;
-      const initialContextWindow = selectedClaudeContextWindow(modelCatalog, modelSelection);
+      const declaredContextWindow = claudeSettings.disable1mContext
+        ? 200_000
+        : resolveClaudeCatalogDeclaredContextWindowTokens(modelCatalog, modelSelection);
+      const initialContextWindow =
+        declaredContextWindow ?? selectedClaudeContextWindow(modelCatalog, modelSelection);
       const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
       const effort =
         resolveClaudeCatalogEffort(modelCatalog, modelSelection?.model, rawEffort) ?? null;
@@ -5051,6 +5084,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         workflowMemberFingerprints,
         liveTaskIds,
         turnState: undefined,
+        declaredContextWindow,
         lastKnownContextWindow: initialContextWindow,
         lastKnownTokenUsage: undefined,
         lastKnownTotalProcessedTokens: undefined,
@@ -5170,6 +5204,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         });
         context.currentApiModelId = apiModelId;
       }
+      context.declaredContextWindow = claudeSettings.disable1mContext
+        ? 200_000
+        : resolveClaudeCatalogDeclaredContextWindowTokens(modelCatalog, modelSelection);
+      context.lastKnownContextWindow =
+        context.declaredContextWindow ?? selectedClaudeContextWindow(modelCatalog, modelSelection);
       context.session = {
         ...context.session,
         model: modelSelection.model,

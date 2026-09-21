@@ -669,9 +669,16 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    disable1mContext: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(false)),
+      Schema.annotateKey({
+        title: "Disable 1M context",
+        description: "Ask Claude Code to use standard context variants for this provider instance.",
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompactWindow", "disable1mContext", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -1359,6 +1366,7 @@ const ClaudeSettingsPatch = Schema.Struct({
   autoCompactWindow: Schema.optionalKey(
     TrimmedString.check(Schema.isPattern(CLAUDE_AUTO_COMPACT_WINDOW_PATTERN)),
   ),
+  disable1mContext: Schema.optionalKey(Schema.Boolean),
 });
 
 const CursorSettingsPatch = Schema.Struct({

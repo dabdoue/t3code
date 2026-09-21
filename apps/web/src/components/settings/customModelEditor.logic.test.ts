@@ -14,6 +14,7 @@ import {
 const draft = (overrides: Partial<CustomModelDraft>): CustomModelDraft => ({
   slug: "my-model",
   name: "",
+  contextWindowTokens: "",
   descriptors: [],
   ...overrides,
 });
@@ -42,6 +43,7 @@ describe("customModelEditor.logic", () => {
     expect(definition).toEqual({
       slug: "my-model",
       name: "My Model",
+      contextWindowTokens: null,
       capabilities: {
         optionDescriptors: [
           {
@@ -169,7 +171,12 @@ describe("customModelEditor.logic", () => {
     ).toBe(false);
     const cursorCopy = descriptorsFromCapabilities(capabilities, ProviderDriverKind.make("cursor"));
     expect(cursorCopy.map((option) => option.id)).toEqual(["contextWindow", "thinking"]);
-    const authored = { slug: "custom", name: "Custom", capabilities };
+    const authored = {
+      slug: "custom",
+      name: "Custom",
+      capabilities,
+      contextWindowTokens: 200_000,
+    };
     expect(
       definitionFromDraft(draftFromDefinition(authored)).capabilities?.optionDescriptors?.[0],
     ).toMatchObject(capabilities.optionDescriptors![0]!);
@@ -222,8 +229,31 @@ describe("customModelEditor.logic", () => {
       slug: "my-model",
       name: "my-model",
       capabilities: null,
+      contextWindowTokens: null,
     });
-    expect(draftFromDefinition({ slug: "x", name: "x", capabilities: null }).name).toBe("");
+    expect(
+      draftFromDefinition({
+        slug: "x",
+        name: "x",
+        capabilities: null,
+        contextWindowTokens: null,
+      }).name,
+    ).toBe("");
+  });
+
+  it("parses and validates a declared context capacity", () => {
+    expect(definitionFromDraft(draft({ contextWindowTokens: "200000" }))).toMatchObject({
+      contextWindowTokens: 200_000,
+    });
+    expect(validateDraft(draft({ contextWindowTokens: "0" }))).toBe(
+      "Context capacity must be a positive whole number of tokens.",
+    );
+    expect(validateDraft(draft({ contextWindowTokens: "200000.5" }))).toBe(
+      "Context capacity must be a positive whole number of tokens.",
+    );
+    expect(validateDraft(draft({ contextWindowTokens: "many" }))).toBe(
+      "Context capacity must be a positive whole number of tokens.",
+    );
   });
 
   it("rejects duplicate ids, blank ids, and selects without choices", () => {

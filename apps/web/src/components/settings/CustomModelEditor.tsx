@@ -314,6 +314,32 @@ export function CustomModelEditor({
         />
       </div>
 
+      {driverKind === "claudeAgent" ? (
+        <div className="flex flex-col gap-1">
+          <label htmlFor={domId("context-window")} className="text-xs text-muted-foreground">
+            Declared context capacity
+          </label>
+          <Input
+            id={domId("context-window")}
+            size="sm"
+            inputMode="numeric"
+            value={draft.contextWindowTokens}
+            onChange={(event) =>
+              setDraft((current) => ({
+                ...current,
+                contextWindowTokens: event.target.value,
+              }))
+            }
+            placeholder="e.g. 200000"
+            className="sm:w-72"
+            spellCheck={false}
+          />
+          <p className="text-[11px] text-muted-foreground/70">
+            Actual capacity of this custom model. Auto-compaction is configured on the provider.
+          </p>
+        </div>
+      ) : null}
+
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs text-muted-foreground">Options shown in the composer</span>

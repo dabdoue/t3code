@@ -46,6 +46,7 @@ import {
   type ClaudeModelCatalog,
   formatClaudeVersionUpgradeMessage,
   resolveClaudeModelsForVersion,
+  scopeClaudeModelCatalog,
 } from "../ClaudeModelCatalog.ts";
 
 const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
@@ -433,8 +434,11 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
 > {
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
+  const effectiveCatalog = scopeClaudeModelCatalog(modelCatalog, [], {
+    disable1mContext: claudeSettings.disable1mContext,
+  });
   const allModels = providerModelsFromSettings(
-    modelCatalog.models.map((entry) => entry.model),
+    effectiveCatalog.models.map((entry) => entry.model),
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
@@ -524,7 +528,7 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
   }
 
   const models = providerModelsFromSettings(
-    resolveClaudeModelsForVersion(modelCatalog, parsedVersion),
+    resolveClaudeModelsForVersion(effectiveCatalog, parsedVersion),
     claudeSettings.customModels,
     DEFAULT_CLAUDE_MODEL_CAPABILITIES,
   );
@@ -598,8 +602,11 @@ export const makePendingClaudeProvider = (
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* nowIso;
+    const effectiveCatalog = scopeClaudeModelCatalog(modelCatalog, [], {
+      disable1mContext: claudeSettings.disable1mContext,
+    });
     const models = providerModelsFromSettings(
-      modelCatalog.models.map((entry) => entry.model),
+      effectiveCatalog.models.map((entry) => entry.model),
       claudeSettings.customModels,
       DEFAULT_CLAUDE_MODEL_CAPABILITIES,
     );

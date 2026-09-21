@@ -28,6 +28,7 @@ export interface EditorDescriptor {
 export interface CustomModelDraft {
   readonly slug: string;
   readonly name: string;
+  readonly contextWindowTokens: string;
   readonly descriptors: ReadonlyArray<EditorDescriptor>;
 }
 
@@ -174,6 +175,7 @@ export function draftFromDefinition(entry: CustomModelDefinition): CustomModelDr
   return {
     slug: entry.slug,
     name: entry.name === entry.slug ? "" : entry.name,
+    contextWindowTokens: entry.contextWindowTokens?.toString() ?? "",
     descriptors: (entry.capabilities?.optionDescriptors ?? []).map(descriptorToEditor),
   };
 }
@@ -193,6 +195,13 @@ export function descriptorsFromCapabilities(
  * order so the message is actionable, or `null` when the draft is sound.
  */
 export function validateDraft(draft: CustomModelDraft): string | null {
+  const contextWindowTokens = draft.contextWindowTokens.trim();
+  if (
+    contextWindowTokens &&
+    (!/^\d+$/u.test(contextWindowTokens) || Number(contextWindowTokens) <= 0)
+  ) {
+    return "Context capacity must be a positive whole number of tokens.";
+  }
   const seenIds = new Set<string>();
   for (const [index, descriptor] of draft.descriptors.entries()) {
     const position = `Option ${index + 1}`;
@@ -252,6 +261,9 @@ export function definitionFromDraft(draft: CustomModelDraft): CustomModelDefinit
   return {
     slug: draft.slug,
     name: name || draft.slug,
+    contextWindowTokens: draft.contextWindowTokens.trim()
+      ? Number(draft.contextWindowTokens.trim())
+      : null,
     capabilities:
       descriptors.length > 0 ? createModelCapabilities({ optionDescriptors: descriptors }) : null,
   };

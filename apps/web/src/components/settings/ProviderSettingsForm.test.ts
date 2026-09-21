@@ -58,7 +58,7 @@ describe("ProviderSettingsForm helpers", () => {
     expect(fields.find((field) => field.key === "apiKey")?.control).toBe("password");
   });
 
-  it("shows the auto-compaction threshold for Claude providers", () => {
+  it("shows the context controls for Claude providers", () => {
     const claude = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("claudeAgent")];
     expect(claude).toBeDefined();
 
@@ -66,6 +66,7 @@ describe("ProviderSettingsForm helpers", () => {
       "binaryPath",
       "homePath",
       "autoCompactWindow",
+      "disable1mContext",
       "launchArgs",
     ]);
   });

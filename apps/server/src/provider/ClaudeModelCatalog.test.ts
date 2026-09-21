@@ -7,6 +7,8 @@ import {
   formatClaudeVersionUpgradeMessage,
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
+  resolveClaudeCatalogContextWindowTokens,
+  resolveClaudeCatalogDeclaredContextWindowTokens,
   resolveClaudeCatalogEffort,
   resolveClaudeModelCatalog,
   resolveClaudeModelsForVersion,
@@ -40,7 +42,11 @@ const manifest = (): ModelManifestData => ({
                 id: "contextWindow",
                 label: "Context Window",
                 type: "select",
-                options: [{ id: "large", label: "Large", isDefault: true }],
+                options: [
+                  { id: "200k", label: "200k" },
+                  { id: "large", label: "Large", isDefault: true },
+                  { id: "1m", label: "1M" },
+                ],
               },
             ],
           },
@@ -143,6 +149,7 @@ describe("Claude model catalog", () => {
       {
         slug: "claude-custom-tuned",
         name: "Tuned",
+        contextWindowTokens: 200_000,
         capabilities: {
           optionDescriptors: [
             {
@@ -177,17 +184,41 @@ describe("Claude model catalog", () => {
       normalizeClaudeCatalogEffort(catalog, "brutal", "claude-custom-tuned"),
       "brutal",
     );
+    const customSelection = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "claude-custom-tuned",
+      options: [{ id: "effort", value: "brutal" }],
+    } as const;
+    assert.strictEqual(resolveClaudeCatalogContextWindowTokens(catalog, customSelection), 200_000);
     assert.strictEqual(
-      resolveClaudeCatalogApiModelId(catalog, {
-        instanceId: ProviderInstanceId.make("claudeAgent"),
-        model: "claude-custom-tuned",
-        options: [{ id: "effort", value: "brutal" }],
-      }),
+      resolveClaudeCatalogDeclaredContextWindowTokens(catalog, customSelection),
+      200_000,
+    );
+    assert.strictEqual(
+      resolveClaudeCatalogApiModelId(catalog, customSelection),
       "claude-custom-tuned",
     );
     assert.deepStrictEqual(
       resolveClaudeModelsForVersion(catalog, "3.2.0").map((model) => model.slug),
       ["claude-synthetic-next", "claude-custom-tuned"],
     );
+  });
+
+  it("removes 1M choices when the provider disables extended context", () => {
+    const catalog = scopeClaudeModelCatalog(resolveClaudeModelCatalog(manifest()), [], {
+      disable1mContext: true,
+    });
+    const model = resolveClaudeModelsForVersion(catalog, "3.2.0")[0]!;
+    const context = model.capabilities?.optionDescriptors?.find(
+      (descriptor) => descriptor.id === "contextWindow" && descriptor.type === "select",
+    );
+    assert.equal(context?.type, "select");
+    if (context?.type === "select") {
+      assert.deepStrictEqual(
+        context.options.map((choice) => choice.id),
+        ["200k", "large"],
+      );
+      assert.equal(context.currentValue, "200k");
+    }
   });
 });

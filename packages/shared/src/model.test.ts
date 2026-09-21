@@ -212,7 +212,7 @@ describe("readCustomModelEntries", () => {
     expect(
       readCustomModelEntries([
         " bare ",
-        { slug: "named", name: " Named ", capabilities },
+        { slug: "named", name: " Named ", capabilities, contextWindowTokens: 200_000 },
         "bare",
         { slug: "named", name: "Second" },
         "",
@@ -220,27 +220,47 @@ describe("readCustomModelEntries", () => {
         42,
       ]),
     ).toEqual([
-      { slug: "bare", name: "bare", capabilities: null },
-      { slug: "named", name: "Named", capabilities },
+      { slug: "bare", name: "bare", capabilities: null, contextWindowTokens: null },
+      { slug: "named", name: "Named", capabilities, contextWindowTokens: 200_000 },
     ]);
   });
 
   it("drops unparseable capabilities but keeps the entry", () => {
     expect(
       readCustomModelEntries([{ slug: "x", capabilities: { optionDescriptors: "nope" } }]),
-    ).toEqual([{ slug: "x", name: "x", capabilities: null }]);
+    ).toEqual([{ slug: "x", name: "x", capabilities: null, contextWindowTokens: null }]);
     expect(readCustomModelEntries("not a list")).toEqual([]);
   });
 
   it("writes the compact stored shape back", () => {
-    expect(toCustomModelSetting({ slug: "x", name: "x", capabilities: null })).toBe("x");
     expect(
-      toCustomModelSetting({ slug: "x", name: "x", capabilities: { optionDescriptors: [] } }),
+      toCustomModelSetting({
+        slug: "x",
+        name: "x",
+        capabilities: null,
+        contextWindowTokens: null,
+      }),
     ).toBe("x");
-    expect(toCustomModelSetting({ slug: "x", name: "X", capabilities })).toEqual({
+    expect(
+      toCustomModelSetting({
+        slug: "x",
+        name: "x",
+        capabilities: { optionDescriptors: [] },
+        contextWindowTokens: null,
+      }),
+    ).toBe("x");
+    expect(
+      toCustomModelSetting({
+        slug: "x",
+        name: "X",
+        capabilities,
+        contextWindowTokens: 200_000,
+      }),
+    ).toEqual({
       slug: "x",
       name: "X",
       capabilities,
+      contextWindowTokens: 200_000,
     });
   });
 });

@@ -42,8 +42,21 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         expect((yield* makeClaudeEnvironment({ homePath })).CLAUDE_CONFIG_DIR).toBe(resolved);
         expect(yield* makeClaudeContinuationGroupKey({ homePath })).toBe(`claude:home:${resolved}`);
         expect(yield* makeClaudeCapabilitiesCacheKey({ binaryPath: "claude", homePath })).toBe(
-          `claude\0${resolved}\0`,
+          `claude\0${resolved}\0\0auto`,
         );
+      }),
+    );
+
+    it.effect("adds the supported Claude Code switch when 1M context is disabled", () =>
+      Effect.gen(function* () {
+        const baseEnv = { PATH: "/synthetic/bin", CLAUDE_CODE_DISABLE_1M_CONTEXT: "0" };
+        const environment = yield* makeClaudeEnvironment(
+          { homePath: "", disable1mContext: true },
+          baseEnv,
+        );
+        expect(environment).not.toBe(baseEnv);
+        expect(environment.CLAUDE_CODE_DISABLE_1M_CONTEXT).toBe("1");
+        expect(environment.PATH).toBe(baseEnv.PATH);
       }),
     );
 

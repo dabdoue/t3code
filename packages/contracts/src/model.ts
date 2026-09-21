@@ -1,7 +1,7 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 
 export const ProviderOptionDescriptorType = Schema.Literals(["select", "boolean"]);
@@ -136,6 +136,8 @@ export const CustomModelEntry = Schema.Struct({
   slug: TrimmedNonEmptyString,
   name: Schema.optional(TrimmedNonEmptyString),
   capabilities: Schema.optional(ModelCapabilities),
+  /** User-declared capacity for runtimes that cannot discover custom model metadata. */
+  contextWindowTokens: Schema.optional(PositiveInt),
 });
 export type CustomModelEntry = typeof CustomModelEntry.Type;
 

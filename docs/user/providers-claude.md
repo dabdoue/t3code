@@ -48,6 +48,16 @@ Set **Auto-compact after** in the Claude provider settings to an integer between
 300,000 tokens. This changes when compaction happens, not the model's context
 window. Leave it empty for Claude Code's default.
 
+Enable **Disable 1M context** when this provider instance must use Claude
+Code's standard-context variants. This is separate from auto-compaction: one
+selects the available model capacity, while the other selects when the active
+conversation is summarized.
+
+For a custom router model, edit the model under **Settings > Providers > Models**
+and set **Declared context capacity** to the model's actual token limit. T3 Code
+uses that value when Claude Code cannot reliably discover metadata through the
+router. Configure the desired compaction point on the provider instance.
+
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to
 a large older thread. See [commands and skills](./composer.md#commands-and-skills)

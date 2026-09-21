@@ -36,7 +36,14 @@ describe("deriveProviderModelsForDisplay", () => {
     expect(
       deriveProviderModelsForDisplay({
         liveModels,
-        customModels: [{ slug: "kept-custom", name: "kept-custom", capabilities: null }],
+        customModels: [
+          {
+            slug: "kept-custom",
+            name: "kept-custom",
+            capabilities: null,
+            contextWindowTokens: null,
+          },
+        ],
       }).map((model) => model.slug),
     ).toEqual(["server-model", "kept-custom"]);
   });
@@ -62,8 +69,13 @@ describe("deriveProviderModelsForDisplay", () => {
     const display = deriveProviderModelsForDisplay({
       liveModels,
       customModels: [
-        { slug: "bare", name: "bare", capabilities: null },
-        { slug: "named", name: "My Model", capabilities: customCapabilities },
+        { slug: "bare", name: "bare", capabilities: null, contextWindowTokens: null },
+        {
+          slug: "named",
+          name: "My Model",
+          capabilities: customCapabilities,
+          contextWindowTokens: null,
+        },
       ],
     });
 
