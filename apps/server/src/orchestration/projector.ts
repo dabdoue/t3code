@@ -430,6 +430,7 @@ export function projectEvent(
             interactionMode: payload.interactionMode,
             branch: payload.branch,
             worktreePath: payload.worktreePath,
+            parentThreadId: payload.parentThreadId ?? null,
             pullRequests: [],
             branchPullRequest: null,
             latestTurn: null,

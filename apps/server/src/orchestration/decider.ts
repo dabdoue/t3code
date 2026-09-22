@@ -386,6 +386,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // A delegate's parent must exist at creation time; deleting the parent
+      // later leaves the child fully independent rather than cascading.
+      if (command.parentThreadId !== undefined) {
+        yield* requireThread({
+          readModel,
+          command,
+          threadId: command.parentThreadId,
+        });
+      }
       return {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -404,6 +413,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           interactionMode: command.interactionMode,
           branch: command.branch,
           worktreePath: command.worktreePath,
+          parentThreadId: command.parentThreadId ?? null,
           createdAt: command.createdAt,
           updatedAt: command.createdAt,
         },
