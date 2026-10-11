@@ -1,18 +1,18 @@
 import { assert, describe, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 
 import { hasValidClaudeManifestAdapters } from "./ClaudeModelManifest.ts";
-import type { ModelManifestData } from "./ModelManifest.ts";
+import { resolveProviderCatalog, type ModelManifestData } from "./ModelManifest.ts";
 import {
   formatClaudeVersionUpgradeMessage,
   normalizeClaudeCatalogEffort,
   resolveClaudeCatalogApiModelId,
   resolveClaudeCatalogContextWindowTokens,
-  resolveClaudeCatalogDeclaredContextWindowTokens,
   resolveClaudeCatalogEffort,
   resolveClaudeModelCatalog,
   resolveClaudeModelsForVersion,
   resolveClaudeModelSlug,
+  resolveClaudeUpdateRequiredModels,
   scopeClaudeModelCatalog,
 } from "./ClaudeModelCatalog.ts";
 
@@ -43,9 +43,8 @@ const manifest = (): ModelManifestData => ({
                 label: "Context Window",
                 type: "select",
                 options: [
-                  { id: "200k", label: "200k" },
                   { id: "large", label: "Large", isDefault: true },
-                  { id: "1m", label: "1M" },
+                  { id: "small", label: "Small" },
                 ],
               },
             ],
@@ -72,14 +71,86 @@ const manifest = (): ModelManifestData => ({
   },
 });
 
+const CLAUDE = ProviderDriverKind.make("claudeAgent");
+
+/** Resolves Claude's catalog the way the driver does: through its manifest catalog entry. */
+const catalogFromManifest = (data: ModelManifestData) =>
+  resolveClaudeModelCatalog(resolveProviderCatalog(data, CLAUDE) ?? undefined);
+
 describe("Claude model catalog", () => {
+  it("resolves capacity from selected options and fixed catalog windows without guessing custom models", () => {
+    const source = manifest();
+    const profile = source.providers!.claudeAgent!.profiles.synthetic!;
+    const catalog = catalogFromManifest({
+      ...source,
+      providers: {
+        claudeAgent: {
+          ...source.providers!.claudeAgent!,
+          profiles: {
+            fixed: {
+              capabilities: { optionDescriptors: [] },
+              adapter: { claudeCode: { fixedContextWindowTokens: 64_000 } },
+            },
+            synthetic: {
+              ...profile,
+              adapter: { claudeCode: { contextWindowTokens: { large: 1_000_000, small: 32_000 } } },
+            },
+          },
+          models: [
+            ...source.providers!.claudeAgent!.models,
+            {
+              slug: "fixed",
+              name: "Fixed",
+              status: "current",
+              profile: "fixed",
+            },
+          ],
+        },
+      },
+    });
+    const selection = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "synthetic" };
+    assert.equal(resolveClaudeCatalogContextWindowTokens(catalog, selection), 1_000_000);
+    assert.equal(
+      resolveClaudeCatalogContextWindowTokens(catalog, {
+        ...selection,
+        options: [{ id: "contextWindow", value: "small" }],
+      }),
+      32_000,
+    );
+    assert.equal(
+      resolveClaudeCatalogContextWindowTokens(catalog, { ...selection, model: "fixed" }),
+      64_000,
+    );
+    assert.isUndefined(
+      resolveClaudeCatalogContextWindowTokens(catalog, { ...selection, model: "custom" }),
+    );
+  });
+
+  it("honors declared custom capacity without requiring option descriptors", () => {
+    const catalog = scopeClaudeModelCatalog(catalogFromManifest(manifest()), [
+      { slug: "router-custom", contextWindowTokens: 128_000 },
+    ]);
+    const selection = {
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+      model: "router-custom",
+    };
+    assert.equal(resolveClaudeCatalogContextWindowTokens(catalog, selection), 128_000);
+    assert.equal(resolveClaudeCatalogApiModelId(catalog, selection), "router-custom");
+    const standard = scopeClaudeModelCatalog(catalog, [], { disable1mContext: true });
+    assert.equal(resolveClaudeCatalogContextWindowTokens(standard, selection), 200_000);
+  });
+
   it("filters models at runtime-version boundaries and derives the upgrade message", () => {
-    const catalog = resolveClaudeModelCatalog(manifest());
+    const catalog = catalogFromManifest(manifest());
     assert.deepStrictEqual(resolveClaudeModelsForVersion(catalog, "3.1.9"), []);
     assert.deepStrictEqual(
       resolveClaudeModelsForVersion(catalog, "3.2.0").map((model) => model.slug),
       ["claude-synthetic-next"],
     );
+    assert.deepStrictEqual(resolveClaudeUpdateRequiredModels(catalog, "3.1.9"), [
+      { slug: "claude-synthetic-next", name: "Claude Synthetic Next", minVersion: "3.2.0" },
+    ]);
+    assert.deepStrictEqual(resolveClaudeUpdateRequiredModels(catalog, "3.2.0"), []);
     assert.strictEqual(
       formatClaudeVersionUpgradeMessage(catalog, "3.1.9"),
       "Claude Code v3.1.9 is too old for Claude Synthetic Next. Upgrade to v3.2.0 or newer to access it.",
@@ -106,7 +177,7 @@ describe("Claude model catalog", () => {
         },
       },
     };
-    const catalog = resolveClaudeModelCatalog(input);
+    const catalog = catalogFromManifest(input);
     assert.strictEqual(resolveClaudeModelSlug(catalog, "synthetic"), "claude-synthetic-next");
     assert.strictEqual(
       resolveClaudeModelSlug(catalog, "claude-synthetic-next"),
@@ -144,12 +215,11 @@ describe("Claude model catalog", () => {
   });
 
   it("appends custom models with their own descriptors and keeps bare slugs opaque", () => {
-    const catalog = scopeClaudeModelCatalog(resolveClaudeModelCatalog(manifest()), [
+    const catalog = scopeClaudeModelCatalog(catalogFromManifest(manifest()), [
       "synthetic",
       {
         slug: "claude-custom-tuned",
         name: "Tuned",
-        contextWindowTokens: 200_000,
         capabilities: {
           optionDescriptors: [
             {
@@ -184,41 +254,17 @@ describe("Claude model catalog", () => {
       normalizeClaudeCatalogEffort(catalog, "brutal", "claude-custom-tuned"),
       "brutal",
     );
-    const customSelection = {
-      instanceId: ProviderInstanceId.make("claudeAgent"),
-      model: "claude-custom-tuned",
-      options: [{ id: "effort", value: "brutal" }],
-    } as const;
-    assert.strictEqual(resolveClaudeCatalogContextWindowTokens(catalog, customSelection), 200_000);
     assert.strictEqual(
-      resolveClaudeCatalogDeclaredContextWindowTokens(catalog, customSelection),
-      200_000,
-    );
-    assert.strictEqual(
-      resolveClaudeCatalogApiModelId(catalog, customSelection),
+      resolveClaudeCatalogApiModelId(catalog, {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-custom-tuned",
+        options: [{ id: "effort", value: "brutal" }],
+      }),
       "claude-custom-tuned",
     );
     assert.deepStrictEqual(
       resolveClaudeModelsForVersion(catalog, "3.2.0").map((model) => model.slug),
       ["claude-synthetic-next", "claude-custom-tuned"],
     );
-  });
-
-  it("removes 1M choices when the provider disables extended context", () => {
-    const catalog = scopeClaudeModelCatalog(resolveClaudeModelCatalog(manifest()), [], {
-      disable1mContext: true,
-    });
-    const model = resolveClaudeModelsForVersion(catalog, "3.2.0")[0]!;
-    const context = model.capabilities?.optionDescriptors?.find(
-      (descriptor) => descriptor.id === "contextWindow" && descriptor.type === "select",
-    );
-    assert.equal(context?.type, "select");
-    if (context?.type === "select") {
-      assert.deepStrictEqual(
-        context.options.map((choice) => choice.id),
-        ["200k", "large"],
-      );
-      assert.equal(context.currentValue, "200k");
-    }
   });
 });
