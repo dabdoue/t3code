@@ -27,7 +27,8 @@ export default Effect.gen(function* () {
       FROM projection_turns
       WHERE completed_at IS NOT NULL
     ),
-    automatic_settlements AS (
+    -- Read the event log once rather than once per projected thread.
+    automatic_settlements AS MATERIALIZED (
       SELECT
         stream_id AS thread_id,
         occurred_at,

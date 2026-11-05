@@ -11,6 +11,7 @@
 import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
+import { reconcileForkMigrationHistory } from "./reconcileForkMigrationHistory.ts";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
 
 // Import all migrations statically
@@ -184,6 +185,10 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  const repairedForkHistory =
+    toMigrationInclusive === undefined || toMigrationInclusive >= 48
+      ? yield* reconcileForkMigrationHistory()
+      : new Map<number, string>();
   const previewMigrations =
     toMigrationInclusive === undefined || toMigrationInclusive >= 55
       ? yield* reconcileV2PreviewMigration()
@@ -212,7 +217,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     if (expected === undefined) {
       return [`${row.migration_id}:${row.name} (unknown to this build)`];
     }
-    return expected === row.name
+    return expected === row.name || repairedForkHistory.get(row.migration_id) === row.name
       ? []
       : [`${row.migration_id}:${row.name} (this build: ${expected})`];
   });

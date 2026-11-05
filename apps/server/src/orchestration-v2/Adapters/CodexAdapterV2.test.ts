@@ -1756,6 +1756,7 @@ describe("CodexAdapterV2 session initialize", () => {
         runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
       });
       return {
+        runtime,
         ensureThread: (threadId: string) =>
           runtime.ensureThread({
             threadId: ThreadId.make(threadId),
@@ -1768,6 +1769,37 @@ describe("CodexAdapterV2 session initialize", () => {
 
   const replayPreamble = (nativeThreadId: string) =>
     codexReplayPreamble({ nativeThreadId, nativeTurnId: "unused", prompt: "unused" });
+
+  it.effect("fails the session event stream when the idle app-server exits", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { runtime, ensureThread } = yield* openReplaySession(
+          makeCodexReplayTranscript({
+            scenario: "idle-process-exit",
+            entries: [
+              ...replayPreamble("idle-native-thread").slice(0, 5),
+              { type: "runtime_exit", status: "success" },
+            ],
+          }),
+        );
+        yield* ensureThread("idle-app-thread");
+        // Start observing after the exit too: the termination must be retained.
+        const error = yield* Stream.runDrain(runtime.events).pipe(
+          Effect.match({
+            onFailure: (cause) => cause,
+            onSuccess: () => assert.fail("Expected the exited session to fail its event stream"),
+          }),
+        );
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterEventStreamError);
+        assert.instanceOf(error.cause, CodexError.CodexAppServerProcessExitedError);
+        assert.equal(error.cause.code, 0);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
 
   it.effect("sends one initialize when two threads start on a fresh session at once", () =>
     Effect.gen(function* () {
