@@ -54,7 +54,11 @@ function fixture(
         id_token: { chatgpt_account_id: string; plan_type?: string; chatgpt_plan_type?: string };
       }
     >;
-    upstream?: (request: RequestBody) => { status: number; body: unknown };
+    upstream?: (request: RequestBody) => {
+      status: number;
+      body: unknown;
+      header?: Record<string, string[]>;
+    };
     cooldownStatus?: number;
   } = {},
 ) {
@@ -106,7 +110,11 @@ function fixture(
       };
       return HttpClientResponse.fromWeb(
         request,
-        Response.json({ status_code: upstream.status, body: encodeJson(upstream.body) }),
+        Response.json({
+          status_code: upstream.status,
+          body: encodeJson(upstream.body),
+          header: upstream.header,
+        }),
       );
     }),
   );
@@ -424,6 +432,41 @@ describe("CLIProxyAPI built-in management API", () => {
       const result = yield* api.consume(config, "missing.json", "credit").pipe(Effect.result);
       expect(result._tag).toBe("Failure");
       expect(test.requests).toHaveLength(1);
+    }),
+  );
+});
+
+describe("Claude quota refresh cooldown", () => {
+  it.effect("retains the measured five-hour window and honors Retry-After across refreshes", () =>
+    Effect.gen(function* () {
+      let limited = false;
+      const setup = fixture({
+        accounts: [{ ...accounts[0]!, provider: "claude", email: "claude@example.com" }],
+        upstream: () =>
+          limited
+            ? { status: 429, body: {}, header: { "Retry-After": ["3600"] } }
+            : {
+                status: 200,
+                body: { five_hour: { utilization: 42, resets_at: "2099-01-01T00:00:00Z" } },
+              },
+      });
+      const api = yield* setup.api;
+      const original = yield* api.readAccounts(config);
+      expect(original[0]?.usageLimits.windows[0]?.usedPercent).toBe(42);
+      yield* api.readAccounts(config);
+      expect(setup.requests.filter((r) => r.body?.url?.includes("oauth/usage"))).toHaveLength(1);
+      limited = true;
+      yield* TestClock.adjust("5 minutes");
+      const throttled = yield* api.readAccounts(config);
+      expect(throttled[0]?.usageLimits).toEqual(original[0]?.usageLimits);
+      yield* TestClock.adjust("31 minutes");
+      yield* api.readAccounts(config);
+      expect(setup.requests.filter((r) => r.body?.url?.includes("oauth/usage"))).toHaveLength(2);
+      limited = false;
+      yield* TestClock.adjust("30 minutes");
+      const recovered = yield* api.readAccounts(config);
+      expect(recovered[0]?.usageLimits.windows[0]?.usedPercent).toBe(42);
+      expect(setup.requests.filter((r) => r.body?.url?.includes("oauth/usage"))).toHaveLength(3);
     }),
   );
 });

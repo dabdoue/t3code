@@ -11,6 +11,12 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 
+import {
+  ClaudeQuotaRateLimited,
+  claudeQuotaRetryAt,
+  isClaudeQuotaRateLimited,
+} from "./claudeQuotaCache.ts";
+
 const API_BASE = "https://api.anthropic.com";
 const PROGRAM = "cedar_ember";
 const GRANT_ID = /^[a-z0-9_-]{1,40}$/;
@@ -160,6 +166,14 @@ export const readClaudeResetCredits = Effect.fn("readClaudeResetCredits")(
         urlParams: { cedar_ember: "1", skip_spend: "1" },
       }).pipe(withClaudeHeaders(token, version)),
     );
+    if (response.status === 429) {
+      return yield* new ClaudeQuotaRateLimited({
+        retryAt: claudeQuotaRetryAt(
+          response.headers["retry-after"],
+          DateTime.toEpochMillis(yield* DateTime.now),
+        ),
+      });
+    }
     const body = yield* HttpClientResponse.schemaBodyJson(UsageResponse)(
       yield* HttpClientResponse.filterStatusOk(response),
     );
@@ -169,7 +183,11 @@ export const readClaudeResetCredits = Effect.fn("readClaudeResetCredits")(
     );
   },
   Effect.timeout("10 seconds"),
-  Effect.orElseSucceed(() => undefined),
+  Effect.catchIf(
+    (error) => !isClaudeQuotaRateLimited(error),
+    () => Effect.void,
+  ),
+  Effect.map((credits) => (typeof credits === "object" ? credits : undefined)),
 );
 
 export const readClaudeOrganizationId = (accountConfigPath: string) =>

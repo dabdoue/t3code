@@ -35,6 +35,7 @@ import {
   spawnAndCollect,
   type ServerProviderDraft,
 } from "@t3tools/provider-core/server/snapshotProbe";
+import { ClaudeQuotaRateLimited } from "./claudeQuotaCache.ts";
 import { resolveClaudeSdkExecutablePath } from "./Drivers/ClaudeExecutable.ts";
 import { hasClaudeManagedMcpConfig, makeClaudeEnvironment } from "./Drivers/ClaudeHome.ts";
 import { discoverClaudeSkills, readClaudeSettingsBaseUrl } from "./Drivers/ClaudeSkills.ts";
@@ -324,6 +325,13 @@ const probeClaudeCapabilities = (
   environment?: NodeJS.ProcessEnv,
   cwd?: string,
   includeUsage = true,
+  readCachedUsage?: (
+    accountKey: string,
+    read: Effect.Effect<
+      Pick<ClaudeCapabilitiesProbe, "usage" | "usageCheckedAt">,
+      Cause.UnknownError | Cause.TimeoutError | ClaudeQuotaRateLimited
+    >,
+  ) => Effect.Effect<Pick<ClaudeCapabilitiesProbe, "usage" | "usageCheckedAt"> | undefined>,
 ) => {
   const abort = new AbortController();
   return Effect.gen(function* () {
@@ -357,19 +365,6 @@ const probeClaudeCapabilities = (
         // Usage has its own deadline so a slow optional request cannot discard initialization.
         // Only the rate limits are read, so skip the local transcript scan that fills
         // `behaviors`: with a few GB of transcripts it outlasts the deadline.
-        const usageCheckedAt = DateTime.formatIso(yield* DateTime.now);
-        const usageResult = includeUsage
-          ? yield* Effect.tryPromise(() =>
-              q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
-            ).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS), Effect.result)
-          : undefined;
-        const usage =
-          usageResult && Result.isSuccess(usageResult)
-            ? {
-                rate_limits_available: usageResult.success.rate_limits_available,
-                rate_limits: usageResult.success.rate_limits,
-              }
-            : undefined;
         const account = init.account as
           | {
               readonly email?: string;
@@ -379,6 +374,38 @@ const probeClaudeCapabilities = (
               readonly apiProvider?: string;
             }
           | undefined;
+        const readUsage = Effect.gen(function* () {
+          const usageCheckedAt = DateTime.formatIso(yield* DateTime.now);
+          const usage = yield* Effect.tryPromise({
+            try: () =>
+              q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET({ skipBehaviors: true }),
+            catch: (cause) =>
+              /429|rate.?limit/i.test(cause instanceof Error ? cause.message : String(cause))
+                ? new ClaudeQuotaRateLimited({ retryAt: Date.parse(usageCheckedAt) + 60 * 60_000 })
+                : new Cause.UnknownError(cause),
+          }).pipe(Effect.timeout(DEFAULT_TIMEOUT_MS));
+          return {
+            usage: {
+              rate_limits_available: usage.rate_limits_available,
+              rate_limits: usage.rate_limits,
+            },
+            usageCheckedAt,
+          };
+        });
+        const usageResult = !includeUsage
+          ? undefined
+          : readCachedUsage
+            ? yield* readCachedUsage(
+                [
+                  account?.email,
+                  account?.subscriptionType,
+                  account?.tokenSource,
+                  account?.apiKeySource,
+                  account?.apiProvider,
+                ].join("\0"),
+                readUsage,
+              )
+            : yield* readUsage.pipe(Effect.orElseSucceed(() => undefined));
         return {
           email: account?.email,
           subscriptionType: account?.subscriptionType,
@@ -386,7 +413,7 @@ const probeClaudeCapabilities = (
           apiKeySource: account?.apiKeySource,
           apiProvider: account?.apiProvider,
           slashCommands: parseClaudeInitializationCommands(init.commands),
-          ...(usage ? { usage, usageCheckedAt } : {}),
+          ...usageResult,
         } satisfies ClaudeCapabilitiesProbe;
       }),
     ),

@@ -16,6 +16,11 @@ import { HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } fr
 import { codexPlanLabel } from "../provider/CodexProvider.ts";
 import { codexRateLimitsToLimits } from "../provider/codexUsageLimits.ts";
 import { claudeUsageResponseToLimits } from "../provider/claudeUsageLimits.ts";
+import {
+  ClaudeQuotaRateLimited,
+  claudeQuotaRetryAt,
+  makeClaudeQuotaCache,
+} from "../provider/claudeQuotaCache.ts";
 import { makeUnavailableUsageLimits } from "@t3tools/provider-core/server/usageLimits";
 
 const AuthFile = Schema.Struct({
@@ -33,7 +38,11 @@ const AuthFile = Schema.Struct({
   ),
 });
 const AuthFiles = Schema.Struct({ files: Schema.Array(AuthFile) });
-const ApiResponse = Schema.Struct({ status_code: Schema.Number, body: Schema.String });
+const ApiResponse = Schema.Struct({
+  status_code: Schema.Number,
+  body: Schema.String,
+  header: Schema.optional(Schema.Record(Schema.String, Schema.Array(Schema.String))),
+});
 const CodexWindow = Schema.Struct({
   used_percent: Schema.Number,
   reset_at: Schema.optional(Schema.NullOr(Schema.Number)),
@@ -160,6 +169,7 @@ const creditRedeemRequestId = Effect.fn("CliproxyApi.creditRedeemRequestId")(fun
 export const makeCliproxyApi = Effect.gen(function* () {
   const client = yield* HttpClient.HttpClient;
   const crypto = yield* Crypto.Crypto;
+  const claudeQuotaCache = yield* makeClaudeQuotaCache<UsageLimitSourceAccount>();
 
   const management = Effect.fn("CliproxyApi.management")(function* (
     config: UsageLimitSourceConfig,
@@ -226,6 +236,13 @@ export const makeCliproxyApi = Effect.gen(function* () {
       ...(data === undefined ? {} : { data: yield* encodeJson(data) }),
     });
     const response = yield* decodeApiResponse(raw);
+    if (account.provider === "claude" && response.status_code === 429) {
+      const now = DateTime.toEpochMillis(yield* DateTime.now);
+      const retryAfter = Object.entries(response.header ?? {}).find(
+        ([name]) => name.toLowerCase() === "retry-after",
+      )?.[1][0];
+      return yield* new ClaudeQuotaRateLimited({ retryAt: claudeQuotaRetryAt(retryAfter, now) });
+    }
     if (response.status_code < 200 || response.status_code >= 300) {
       return yield* new UsageLimitSourceError({
         detail: `The provider refused the hub request (HTTP ${response.status_code}).`,
@@ -339,16 +356,28 @@ export const makeCliproxyApi = Effect.gen(function* () {
         },
       };
     });
-    return yield* read.pipe(
-      Effect.orElseSucceed(() => ({
-        ...base,
-        usageLimits: makeUnavailableUsageLimits({
-          checkedAt,
-          reason: "probeFailed",
-          message: "The hub could not read this account's usage.",
-        }),
-      })),
-    );
+    const unavailable = () => ({
+      ...base,
+      usageLimits: makeUnavailableUsageLimits({
+        checkedAt,
+        reason: "probeFailed",
+        message: "The hub could not read this account's usage.",
+      }),
+    });
+    if (account.provider === "claude") {
+      const keyHash = Hex.encode(
+        yield* crypto
+          .digest("SHA-256", new TextEncoder().encode(config.managementKey))
+          .pipe(Effect.orDie),
+      );
+      return (
+        (yield* claudeQuotaCache.read(
+          [config.url, keyHash, account.id, account.email].join("\0"),
+          read,
+        )) ?? unavailable()
+      );
+    }
+    return yield* read.pipe(Effect.orElseSucceed(unavailable));
   });
 
   const readAccounts = Effect.fn("CliproxyApi.readAccounts")(function* (

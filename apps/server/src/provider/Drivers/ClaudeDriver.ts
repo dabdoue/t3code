@@ -23,6 +23,7 @@ import {
 } from "../../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
+import { makeClaudeQuotaCache } from "../claudeQuotaCache.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
 import { isZaiClaudeEnvironment, withZaiCodingPlanUsageLimits } from "../zaiUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
@@ -207,10 +208,29 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     // Per-instance capabilities cache: keyed on binary + resolved HOME so
     // account-specific probes never share auth metadata across instances.
     // A transient miss may reuse the last account once, but its usage windows keep their age.
+    const usageProbeCache =
+      yield* makeClaudeQuotaCache<Pick<ClaudeCapabilitiesProbe, "usage" | "usageCheckedAt">>();
+    const resetCreditsCache =
+      yield* makeClaudeQuotaCache<
+        Effect.Success<ReturnType<typeof ClaudeResetCredits.readClaudeResetCredits>>
+      >();
     const lastGoodCapabilities = yield* Ref.make<ClaudeCapabilitiesProbe | undefined>(undefined);
     const capabilitiesProbeCache = yield* Cache.makeWith(
       () =>
-        probeClaudeCapabilities(effectiveConfig, processEnv, stateDir, !zaiCodingPlan).pipe(
+        probeClaudeCapabilities(
+          effectiveConfig,
+          processEnv,
+          stateDir,
+          !zaiCodingPlan,
+          (accountKey, read) =>
+            ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+              Effect.flatMap((workspaceId) =>
+                usageProbeCache.read([workspaceId, accountKey].join("\0"), read),
+              ),
+              Effect.provideService(FileSystem.FileSystem, fileSystem),
+              Effect.provideService(Path.Path, path),
+            ),
+        ).pipe(
           Effect.flatMap((capabilities) =>
             ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
               Effect.map((workspaceId) => ({
@@ -276,7 +296,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               zaiCodingPlan
                 ? undefined
                 : (version) =>
-                    ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
+                    ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
+                      Effect.flatMap((workspaceId) =>
+                        resetCreditsCache.read(
+                          workspaceId ?? configDir,
+                          ClaudeResetCredits.readClaudeResetCredits(configDir, version),
+                        ),
+                      ),
                       Effect.provideService(HttpClient.HttpClient, httpClient),
                       Effect.provideService(FileSystem.FileSystem, fileSystem),
                       Effect.provideService(Path.Path, path),
@@ -378,6 +404,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         Effect.gen(function* () {
           const before = (yield* snapshot.getSnapshot).usageLimits?.checkedAt;
           yield* Cache.invalidateAll(capabilitiesProbeCache);
+          yield* usageProbeCache.invalidate;
+          yield* resetCreditsCache.invalidate;
           const refreshed = yield* snapshot.refresh;
           const after = refreshed.usageLimits?.checkedAt;
           if (

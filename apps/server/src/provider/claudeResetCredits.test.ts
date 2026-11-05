@@ -125,8 +125,13 @@ effectIt.layer(NodeServices.layer)("readClaudeResetCredits", (it) => {
       const limited = yield* ClaudeResetCredits.readClaudeResetCredits(configDir, "2.1.0").pipe(
         Effect.provideService(HostProcess.Platform, "linux"),
         Effect.provideService(HttpClient.HttpClient, respond(429, {})),
+        Effect.result,
       );
-      expect([darwin, limited]).toEqual([undefined, undefined]);
+      expect(darwin).toBeUndefined();
+      expect(limited).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "ClaudeQuotaRateLimited" },
+      });
     }),
   );
 });
