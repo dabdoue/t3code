@@ -2185,6 +2185,7 @@ const make = Effect.gen(function* () {
             providerInstanceId: provider.instanceId,
             driverKind: provider.driver,
             displayName: provider.displayName ?? null,
+            ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
             models: listed.map((model) => {
               const options = model.capabilities?.optionDescriptors ?? [];
               return {

@@ -24,6 +24,7 @@ import {
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
+import { isZaiClaudeEnvironment, withZaiCodingPlanUsageLimits } from "../zaiUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
@@ -128,6 +129,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     // wrappers that scope themselves to their cwd refuse to run there.
     const { stateDir } = yield* ServerConfig.ServerConfig;
     const httpClient = yield* HttpClient.HttpClient;
+    const crypto = yield* Crypto.Crypto;
     const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
     const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
     const catalogService = yield* ModelCatalog.ModelCatalog;
@@ -135,6 +137,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       .current(DRIVER_KIND)
       .pipe(Effect.map(resolveClaudeModelCatalog));
     const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+    const zaiCodingPlan = isZaiClaudeEnvironment(processEnv);
     const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
       driverKind: DRIVER_KIND,
       instanceId,
@@ -179,7 +182,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         enabled,
         config,
       },
-      { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+      {
+        scopedLimitNames,
+        onUsageLimits: (update) =>
+          zaiCodingPlan ? Effect.void : snapshot.applyUsageLimits(update),
+      },
     ).pipe(
       Effect.mapError(
         (cause) =>
@@ -203,7 +210,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
     const lastGoodCapabilities = yield* Ref.make<ClaudeCapabilitiesProbe | undefined>(undefined);
     const capabilitiesProbeCache = yield* Cache.makeWith(
       () =>
-        probeClaudeCapabilities(effectiveConfig, processEnv, stateDir).pipe(
+        probeClaudeCapabilities(effectiveConfig, processEnv, stateDir, !zaiCodingPlan).pipe(
           Effect.flatMap((capabilities) =>
             ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath).pipe(
               Effect.map((workspaceId) => ({
@@ -241,7 +248,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           // Only fresh usage earns the TTL; failures, fallbacks and usage-less probes retry.
           Exit.isSuccess(exit) &&
           exit.value._tag === "fresh" &&
-          exit.value.capabilities.usage !== undefined
+          (zaiCodingPlan || exit.value.capabilities.usage !== undefined)
             ? CAPABILITIES_PROBE_TTL
             : Duration.zero,
       },
@@ -266,12 +273,14 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               stateDir,
               catalog,
               scopedLimitNames,
-              (version) =>
-                ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
-                  Effect.provideService(HttpClient.HttpClient, httpClient),
-                  Effect.provideService(FileSystem.FileSystem, fileSystem),
-                  Effect.provideService(Path.Path, path),
-                ),
+              zaiCodingPlan
+                ? undefined
+                : (version) =>
+                    ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
+                      Effect.provideService(HttpClient.HttpClient, httpClient),
+                      Effect.provideService(FileSystem.FileSystem, fileSystem),
+                      Effect.provideService(Path.Path, path),
+                    ),
             ),
           ),
           Effect.tap((provider) =>
@@ -279,12 +288,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
               ? Cache.invalidateAll(capabilitiesProbeCache)
               : Effect.void,
           ),
+          Effect.flatMap((provider) => withZaiCodingPlanUsageLimits(provider, processEnv)),
           Effect.map(stampIdentity),
         ),
       ),
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+      Effect.provideService(Crypto.Crypto, crypto),
     );
 
     const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
