@@ -871,6 +871,53 @@ describe("OrchestratorMcpService provider resolution", () => {
     turnItems: [],
   } as unknown as OrchestrationV2ThreadProjection;
 
+  it.effect("exposes current provider quota to agents without account credentials", () =>
+    Effect.gen(function* () {
+      const instanceId = ProviderInstanceId.make("CC_GLM");
+      const usageLimits = {
+        checkedAt: "2026-11-05T10:00:00.000Z",
+        windows: [
+          {
+            id: "zai_five_hour",
+            kind: "session" as const,
+            label: "GLM · 5 hours",
+            usedPercent: 40,
+          },
+        ],
+      };
+      const providers = [
+        {
+          ...providerSnapshot({
+            instanceId,
+            driver: ProviderDriverKind.make("claudeAgent"),
+            model: "glm-5.3",
+          }),
+          usageLimits,
+        },
+      ];
+      const serviceLayer = OrchestratorMcpService.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            NodeServices.layer,
+            Layer.mock(ThreadManagementService.ThreadManagementService)({
+              getThreadRecords: () => Effect.succeed(parentProjection([])),
+            }),
+            providerRegistryLayer(providers),
+            adapterRegistryLayer([instanceId]),
+            Layer.mock(ProjectService.ProjectService)({}),
+            Layer.mock(SecretRequests.SecretRequests)({}),
+            Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+          ),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const result = yield* service.capabilities(scope);
+        assert.deepStrictEqual(result.providers[0]?.usageLimits, usageLimits);
+      }).pipe(Effect.provide(serviceLayer));
+    }),
+  );
+
   it.effect(
     "advertises orchestration capability from registered adapters rather than a driver allowlist",
     () =>

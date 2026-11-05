@@ -1866,6 +1866,7 @@ const make = Effect.gen(function* () {
               providerInstanceId: provider.instanceId,
               driverKind: provider.driver,
               displayName: provider?.displayName ?? null,
+              ...(provider.usageLimits ? { usageLimits: provider.usageLimits } : {}),
               models:
                 provider?.models.map((model) => ({
                   id: model.slug,

@@ -36,6 +36,7 @@ import {
 import { ProviderDriverError } from "../Errors.ts";
 import { claudeUsageReader } from "./claudeUsage.ts";
 import { makeClaudeScopedLimitNames } from "../claudeUsageLimits.ts";
+import { isZaiClaudeEnvironment, withZaiCodingPlanUsageLimits } from "../zaiUsageLimits.ts";
 import * as ClaudeResetCredits from "../claudeResetCredits.ts";
 import * as ResetCreditCoordinator from "../resetCreditCoordinator.ts";
 import {
@@ -125,6 +126,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
       const path = yield* Path.Path;
       const { cwd } = yield* ServerConfig.ServerConfig;
       const httpClient = yield* HttpClient.HttpClient;
+      const crypto = yield* Crypto.Crypto;
       const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
       const resetCreditCoordinator = yield* ResetCreditCoordinator.ResetCreditCoordinator;
       const catalogService = yield* ModelCatalog.ModelCatalog;
@@ -132,6 +134,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         .current(DRIVER_KIND)
         .pipe(Effect.map(resolveClaudeModelCatalog));
       const processEnv = yield* mergeProviderInstanceEnvironment(environment);
+      const zaiCodingPlan = isZaiClaudeEnvironment(processEnv);
       const fallbackContinuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
@@ -179,7 +182,11 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           enabled,
           config,
         },
-        { scopedLimitNames, onUsageLimits: (update) => snapshot.applyUsageLimits(update) },
+        {
+          scopedLimitNames,
+          onUsageLimits: (update) =>
+            zaiCodingPlan ? Effect.void : snapshot.applyUsageLimits(update),
+        },
       ).pipe(
         Effect.mapError(
           (cause) =>
@@ -204,8 +211,10 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
         timeToLive: CAPABILITIES_PROBE_TTL,
         lookup: () =>
           Effect.all([
-            probeClaudeCapabilities(effectiveConfig, processEnv, cwd),
-            ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath),
+            probeClaudeCapabilities(effectiveConfig, processEnv, cwd, !zaiCodingPlan),
+            zaiCodingPlan
+              ? Effect.void
+              : ClaudeResetCredits.readClaudeOrganizationId(accountConfigPath),
           ]).pipe(
             Effect.map(([capabilities, workspaceId]) =>
               capabilities && workspaceId ? { ...capabilities, workspaceId } : capabilities,
@@ -233,20 +242,25 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
                 cwd,
                 catalog,
                 scopedLimitNames,
-                (version) =>
-                  ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
-                    Effect.provideService(HttpClient.HttpClient, httpClient),
-                    Effect.provideService(FileSystem.FileSystem, fileSystem),
-                    Effect.provideService(Path.Path, path),
-                  ),
+                zaiCodingPlan
+                  ? undefined
+                  : (version) =>
+                      ClaudeResetCredits.readClaudeResetCredits(configDir, version).pipe(
+                        Effect.provideService(HttpClient.HttpClient, httpClient),
+                        Effect.provideService(FileSystem.FileSystem, fileSystem),
+                        Effect.provideService(Path.Path, path),
+                      ),
               ),
             ),
+            Effect.flatMap((provider) => withZaiCodingPlanUsageLimits(provider, processEnv)),
             Effect.map(stampIdentity),
           ),
         ),
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Effect.provideService(FileSystem.FileSystem, fileSystem),
         Effect.provideService(Path.Path, path),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+        Effect.provideService(Crypto.Crypto, crypto),
       );
 
       const snapshotSettings = yield* makeProviderSnapshotSettingsSource(effectiveConfig);
